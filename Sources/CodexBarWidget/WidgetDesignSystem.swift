@@ -312,7 +312,7 @@ struct HeroBlock: View {
             if let detail = self.detail {
                 detail
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
@@ -422,12 +422,12 @@ struct FreshnessLabel: View {
     let updatedAt: Date
 
     var body: some View {
+        // WidgetKit's live date layout cannot use fixedSize; it can erase the rest of the tile.
         Text(self.updatedAt, style: .relative)
             .font(.caption2)
             .foregroundStyle(WidgetFreshness
                 .isStale(self.updatedAt) ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
             .lineLimit(1)
-            .fixedSize()
     }
 }
 
