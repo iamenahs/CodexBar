@@ -44,7 +44,37 @@ struct MenuBarLayoutDragItem: Codable, Hashable, Transferable, Sendable {
 }
 
 enum MenuBarLayoutPaletteTokens {
-    static let time: [MenuBarLayoutToken] = [.resetCountdown, .resetAbsolute, .runsOut, .runsOutCompact]
+    static let time: [MenuBarLayoutToken] = [
+        .resetCountdown,
+        .resetAbsolute,
+        .windowResetCountdown(window: .session),
+        .windowResetAbsolute(window: .session),
+        .windowResetCountdown(window: .weekly),
+        .windowResetAbsolute(window: .weekly),
+        .runsOut,
+        .runsOutCompact,
+    ]
+
+    static let conditionalBranch: [MenuBarLayoutToken] = [
+        .icon,
+        .providerName,
+        .accountLabel,
+        .percent(window: .session),
+        .percent(window: .weekly),
+        .percent(window: .scopedWeekly),
+        .percent(window: .automatic),
+        .usageBar,
+        .pace(window: .session),
+        .pace(window: .weekly),
+        .pace(window: .automatic),
+    ] + Self.time + [
+        .balance,
+        .costToday,
+        .cost30d,
+        .separatorDot,
+        .space,
+        .hidden,
+    ]
 }
 
 enum MenuBarLayoutEditorMutations {
@@ -128,13 +158,34 @@ enum MenuBarLayoutEditorMutations {
     }
 }
 
-private enum MenuBarLayoutEditorScope: Hashable {
+enum MenuBarLayoutEditorScope: Hashable {
     case all
     case provider(UsageProvider)
+
+    var previewLabel: String {
+        switch self {
+        case .all: L("menu_bar_layout_default_preview")
+        case .provider: L("menu_bar_layout_live_preview")
+        }
+    }
+
+    @MainActor
+    func providersWithOverrides(settings: SettingsStore) -> [UsageProvider] {
+        guard self == .all else { return [] }
+        let overrides = settings.menuBarLayoutOverrides
+        return settings.orderedFirstPartyProviders().filter {
+            settings.providerEnablement[$0.instanceID] == true && overrides[$0] != nil
+        }
+    }
 }
 
 @MainActor
 enum MenuBarLayoutEditorPersistence {
+    static func useAllProvidersLayout(for provider: UsageProvider, settings: SettingsStore) {
+        guard settings.providerEnablement[provider.instanceID] == true else { return }
+        settings.removeMenuBarLayoutOverride(for: provider)
+    }
+
     static func activate(
         _ layout: MenuBarLayout,
         for provider: UsageProvider?,
@@ -289,6 +340,7 @@ struct MenuBarLayoutEditor: View {
         VStack(alignment: .leading, spacing: 12) {
             self.header
             self.preview
+            self.overridesDisclosure
             self.layoutStrip
             self.removeDropTarget
 
@@ -347,11 +399,7 @@ struct MenuBarLayoutEditor: View {
             if case let .provider(provider) = self.scope,
                self.settings.menuBarLayoutOverrides[provider] != nil
             {
-                Button(L("menu_bar_layout_use_all")) {
-                    self.settings.removeMenuBarLayoutOverride(for: provider)
-                    self.selectedPosition = nil
-                }
-                .buttonStyle(.link)
+                self.useAllProvidersLayoutButton(for: provider)
             }
 
             Spacer(minLength: 8)
@@ -384,9 +432,39 @@ struct MenuBarLayoutEditor: View {
         }
     }
 
+    @ViewBuilder
+    private var overridesDisclosure: some View {
+        let providers = self.scope.providersWithOverrides(settings: self.settings)
+        if !providers.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L("menu_bar_layout_overrides_notice"))
+                    .foregroundStyle(.secondary)
+                ForEach(providers, id: \.self) { provider in
+                    HStack {
+                        Text(L(self.store.metadata(for: provider).displayName))
+                        Spacer(minLength: 8)
+                        self.useAllProvidersLayoutButton(for: provider)
+                    }
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    private func useAllProvidersLayoutButton(for provider: UsageProvider) -> some View {
+        Button(L("menu_bar_layout_use_all")) {
+            MenuBarLayoutEditorPersistence.useAllProvidersLayout(for: provider, settings: self.settings)
+            self.selectedPosition = nil
+        }
+        .buttonStyle(.link)
+        .accessibilityLabel(L(
+            "menu_bar_layout_use_all_accessibility",
+            L(self.store.metadata(for: provider).displayName)))
+    }
+
     private var preview: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(L("menu_bar_layout_live_preview"))
+            Text(self.scope.previewLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             MenuBarLayoutPreview(
@@ -871,7 +949,8 @@ struct MenuBarLayoutPreview: View {
                 appearanceName: "preview",
                 isDebugApp: false,
                 now: minute,
-                verticalAdjustment: self.settings.menuBarLayoutVerticalAdjustment))
+                verticalAdjustment: self.settings.menuBarLayoutVerticalAdjustment,
+                colorPace: self.settings.menuBarColorPace))
         MenuBarLayoutPreviewText(rendered: rendered)
     }
 
@@ -926,6 +1005,7 @@ struct MenuBarLayoutPreview: View {
             self.store.weeklyPace(
                 provider: provider,
                 window: $0,
+                dataConfidence: snapshot.dataConfidence,
                 now: now)
         }
         let runsOut = pace
@@ -935,6 +1015,11 @@ struct MenuBarLayoutPreview: View {
         let balanceAmounts = MenuBarLayoutBalanceResolver.balanceAmountsUSD(
             provider: provider,
             snapshot: snapshot)
+        let codexCredits = self.store.codexConsumerProjectionIfNeeded(
+            for: provider,
+            surface: .menuBar,
+            snapshotOverride: snapshot,
+            now: now)?.credits?.snapshot
         // Thresholds are USD, and `convertedCost` returns the source amount unchanged when no rate
         // exists, so keep the datum only when the conversion actually landed in USD.
         let toUSD = { (value: Double) -> Double? in
@@ -959,19 +1044,31 @@ struct MenuBarLayoutPreview: View {
             scopedWeekly: MenuBarLayoutRenderWindow(scopedNamed?.window),
             scopedWeeklyTitle: scopedNamed?.title,
             automatic: automaticRenderWindow,
-            // Provider-specific by design: Mistral uses spend text when its automatic lane has no percentage window.
-            automaticText: provider == .mistral && automaticRenderWindow == nil
-                ? StatusItemController.mistralSpendDisplayText(snapshot: snapshot)
-                : nil,
-            sessionPace: self.store.menuBarLayoutPaceText(provider: provider, window: session, now: now),
+            automaticText: StatusItemController.menuBarLayoutAutomaticText(
+                provider: provider,
+                snapshot: snapshot,
+                automatic: automaticRenderWindow),
+            sessionPace: self.store.menuBarLayoutPaceText(
+                provider: provider,
+                window: session,
+                dataConfidence: snapshot.dataConfidence,
+                now: now),
             weeklyPace: self.store.menuBarLayoutPaceText(
                 provider: provider,
                 window: weekly,
+                dataConfidence: snapshot.dataConfidence,
                 now: now,
                 minimumElapsedPercent: 1),
-            automaticPace: self.store.menuBarLayoutPaceText(provider: provider, window: automatic, now: now),
+            automaticPace: self.store.menuBarLayoutPaceText(
+                provider: provider,
+                window: automatic,
+                dataConfidence: snapshot.dataConfidence,
+                now: now),
             runsOut: runsOut,
-            balance: MenuBarLayoutBalanceResolver.balance(provider: provider, snapshot: snapshot),
+            balance: MenuBarLayoutBalanceResolver.balance(
+                provider: provider,
+                snapshot: snapshot,
+                codexCredits: codexCredits),
             costToday: costToday.map {
                 UsageFormatter.currencyString($0, currencyCode: cost?.currencyCode ?? "USD")
             },
@@ -982,15 +1079,18 @@ struct MenuBarLayoutPreview: View {
                 sessionPaceDelta: self.store.menuBarLayoutPaceDelta(
                     provider: provider,
                     window: session,
+                    dataConfidence: snapshot.dataConfidence,
                     now: now),
                 weeklyPaceDelta: self.store.menuBarLayoutPaceDelta(
                     provider: provider,
                     window: weekly,
+                    dataConfidence: snapshot.dataConfidence,
                     now: now,
                     minimumElapsedPercent: 1),
                 automaticPaceDelta: self.store.menuBarLayoutPaceDelta(
                     provider: provider,
                     window: automatic,
+                    dataConfidence: snapshot.dataConfidence,
                     now: now),
                 runsOutMinutes: pace?.etaSeconds.map { Int(($0 / 60).rounded()) },
                 balanceRemainingUSD: balanceAmounts.remaining,
@@ -1143,14 +1243,19 @@ extension MenuBarLayoutToken {
     }
 
     private func providerEditorLabel(provider: UsageProvider?) -> String? {
-        guard let provider,
-              let secondaryLabel = ProviderDescriptorRegistry.descriptor(for: provider).presentation
-                  .menuBarLayoutSecondaryLabel
-        else { return nil }
-        let localizedLabel = L(secondaryLabel)
+        let window: PercentWindow? = switch self {
+        case let .percent(window), let .pace(window),
+             let .windowResetCountdown(window), let .windowResetAbsolute(window): window
+        default: nil
+        }
+        guard let localizedLabel = window?.providerLabel(provider: provider) else { return nil }
         return switch self {
-        case .percent(window: .weekly): L("%@ %@", localizedLabel, "%")
-        case .pace(window: .weekly): L("%@ %@", localizedLabel, L("display_mode_pace").lowercased())
+        case .percent: L("%@ %@", localizedLabel, "%")
+        case .pace: L("%@ %@", localizedLabel, L("display_mode_pace").lowercased())
+        case .windowResetCountdown:
+            L("%@: %@", localizedLabel, L("menu_bar_layout_token_resets_in"))
+        case .windowResetAbsolute:
+            L("%@: %@", localizedLabel, L("menu_bar_layout_token_reset_at"))
         default: nil
         }
     }
@@ -1172,6 +1277,10 @@ extension MenuBarLayoutToken {
         case .usageBar: L("menu_bar_layout_token_bar")
         case .resetCountdown: L("menu_bar_layout_token_resets_in")
         case .resetAbsolute: L("menu_bar_layout_token_reset_at")
+        case let .windowResetCountdown(window):
+            L("%@: %@", Self.resetWindowLabel(window), L("menu_bar_layout_token_resets_in"))
+        case let .windowResetAbsolute(window):
+            L("%@: %@", Self.resetWindowLabel(window), L("menu_bar_layout_token_reset_at"))
         case .runsOut: L("menu_bar_layout_token_runs_out")
         case .runsOutCompact: "\(L("menu_bar_layout_token_runs_out")) (compact)"
         case .balance: L("Balance")
@@ -1181,6 +1290,15 @@ extension MenuBarLayoutToken {
         case .space: L("menu_bar_layout_token_space")
         case .conditional: L("menu_bar_layout_token_conditional")
         case .hidden: L("menu_bar_layout_conditional_hide")
+        }
+    }
+
+    private static func resetWindowLabel(_ window: PercentWindow) -> String {
+        switch window {
+        case .session: L("Session")
+        case .weekly: L("Weekly")
+        case .scopedWeekly: L("menu_bar_layout_conditional_metric_scoped_weekly")
+        case .automatic: L("Automatic")
         }
     }
 
@@ -1210,8 +1328,8 @@ extension MenuBarLayoutToken {
         case .percent, .lanePercent: "percent"
         case .pace: "speedometer"
         case .usageBar: "chart.bar.fill"
-        case .resetCountdown: "timer"
-        case .resetAbsolute: "clock"
+        case .resetCountdown, .windowResetCountdown: "timer"
+        case .resetAbsolute, .windowResetAbsolute: "clock"
         case .runsOut, .runsOutCompact: "hourglass.bottomhalf.filled"
         case .balance: "creditcard"
         case .costToday: "dollarsign.circle"

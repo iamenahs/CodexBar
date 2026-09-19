@@ -10,6 +10,9 @@ extension EnvironmentValues {
     /// host can set it, so the tinted and clear appearances are unreachable from a preview without
     /// this. Always nil in the shipping widget.
     @Entry var widgetRenderingModeOverride: WidgetRenderingMode?
+
+    /// Native previews keep selection local instead of writing shared widget preferences.
+    @Entry var widgetProviderSelectionOverride: ((UsageProvider) -> Void)?
 }
 
 // MARK: - Layout metrics
@@ -18,7 +21,6 @@ extension EnvironmentValues {
 /// budget, so every value here is chosen against the macOS tile sizes (155×155, 329×155, 329×345)
 /// rather than tuned by eye.
 enum WidgetLayout {
-    static let tilePadding: CGFloat = 14
     static let sectionSpacing: CGFloat = 10
     static let laneSpacing: CGFloat = 7
     static let barHeight: CGFloat = 7
@@ -164,18 +166,8 @@ struct ProviderMarkStyle {
 }
 
 enum ProviderTitle {
-    /// Roughly what fits beside the mark and the pager control on a 155pt tile at subheadline size.
-    static let compactCharacterBudget = 13
-
-    /// The provider name a tile of this size can print in full. Small tiles fall back to the
-    /// provider's own short name rather than truncating — a clipped identifier is exactly what this
-    /// header exists to avoid.
-    static func text(for provider: UsageProvider, size: WidgetTileSize) -> String {
-        let metadata = ProviderDefaults.metadata[provider]
-        let name = metadata?.displayName ?? provider.rawValue.capitalized
-        guard size == .small, name.count > self.compactCharacterBudget else { return name }
-        let short = metadata?.shortDisplayName ?? name
-        return short.count < name.count ? short : name
+    static func text(for provider: UsageProvider, size _: WidgetTileSize) -> String {
+        ProviderDefaults.metadata[provider]?.displayName ?? provider.rawValue.capitalized
     }
 }
 
@@ -272,8 +264,8 @@ enum QuotaSeverity {
 /// so a lane at 3% and a lane at 97% looked equally routine.
 struct HeroBlock: View {
     let value: String
-    var caption: String?
-    var detail: String?
+    var caption: Text?
+    var detail: Text?
     /// Percentage for the accompanying bar. `nil` draws no bar.
     var barPercent: Double?
     var isLow: Bool = false
@@ -282,6 +274,7 @@ struct HeroBlock: View {
     /// Pushes the bar to the bottom of the available height so a column tile has no dead space
     /// under the headline.
     var spreads: Bool = false
+    var compact: Bool = false
 
     var isUnavailable: Bool {
         self.value == WidgetFormat.unavailable
@@ -296,24 +289,28 @@ struct HeroBlock: View {
         VStack(alignment: .leading, spacing: 2) {
             // A missing figure is drawn small and muted: at headline size the em-dash placeholder
             // reads as a heavy black bar, which looks like a broken tile rather than "no data".
-            Text(self.value)
-                .font(.system(
-                    size: self.isUnavailable ? self.numberSize * 0.5 : self.numberSize,
-                    weight: .semibold,
-                    design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(self.unavailableAwareColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-            if let caption = self.caption {
-                Text(caption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+            if self.compact {
+                HStack(alignment: .center, spacing: 5) {
+                    self.valueText
+                    self.caption?
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                self.valueText
+                if let caption = self.caption {
+                    caption
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
             }
             if let detail = self.detail {
-                Text(detail)
+                detail
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -323,10 +320,25 @@ struct HeroBlock: View {
                 if self.spreads {
                     Spacer(minLength: 5)
                 }
-                QuotaBar(percent: barPercent, color: self.color, height: WidgetLayout.heroBarHeight)
-                    .padding(.top, self.spreads ? 0 : 5)
+                QuotaBar(
+                    percent: barPercent,
+                    color: self.color,
+                    height: self.compact ? 6 : WidgetLayout.heroBarHeight)
+                    .padding(.top, self.spreads ? 0 : self.compact ? 2 : 5)
             }
         }
+    }
+
+    private var valueText: some View {
+        Text(self.value)
+            .font(.system(
+                size: self.isUnavailable ? self.numberSize * 0.5 : self.numberSize,
+                weight: .semibold,
+                design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(self.unavailableAwareColor)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
     }
 }
 
@@ -334,13 +346,13 @@ struct HeroBlock: View {
 
 /// A right-aligned figure with a muted label, used for cost and credit rows.
 struct MetricLine: View {
-    let title: String
+    let title: Text
     let value: String
     var isProminent: Bool = false
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(self.title)
+            self.title
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -376,27 +388,25 @@ struct TileHeader: View {
     var size: WidgetTileSize = .medium
 
     var body: some View {
-        HStack(spacing: 7) {
-            if let provider = self.provider.firstPartyProvider {
-                ProviderMark(provider: provider, isSelected: true, size: WidgetLayout.markSizeSmall)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                if let provider = self.provider.firstPartyProvider {
+                    ProviderMark(provider: provider, isSelected: true, size: WidgetLayout.markSizeSmall)
+                }
+                Text(self.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .layoutPriority(1)
+                Spacer(minLength: 0)
+                if self.size != .small {
+                    FreshnessLabel(updatedAt: self.updatedAt)
+                }
             }
-            Text(self.displayName)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .layoutPriority(1)
-            Spacer(minLength: 4)
-            if self.showsFreshness {
+            if self.size == .small, WidgetFreshness.isStale(self.updatedAt) {
                 FreshnessLabel(updatedAt: self.updatedAt)
             }
         }
-    }
-
-    /// A small tile cannot fit the provider name and the timestamp side by side — the name used to
-    /// lose, leaving "C…". The name always wins; on small the timestamp appears only once the data
-    /// is stale enough to matter.
-    private var showsFreshness: Bool {
-        self.size != .small || WidgetFreshness.isStale(self.updatedAt)
     }
 
     private var displayName: String {
@@ -412,7 +422,7 @@ struct FreshnessLabel: View {
     let updatedAt: Date
 
     var body: some View {
-        Text(WidgetFormat.shortRelativeDate(self.updatedAt))
+        Text(self.updatedAt, style: .relative)
             .font(.caption2)
             .foregroundStyle(WidgetFreshness
                 .isStale(self.updatedAt) ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))

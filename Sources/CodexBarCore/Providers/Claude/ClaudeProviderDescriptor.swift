@@ -1,7 +1,16 @@
 import Foundation
+import SweetCookieKit
 
 public enum ClaudeProviderDescriptor {
     public static let descriptor: ProviderDescriptor = Self.makeDescriptor()
+    private static var browserCookieOrder: BrowserCookieImportOrder? {
+        #if os(macOS)
+        [.chrome] + Browser.defaultImportOrder.filter { $0 != .chrome }
+        #else
+        nil
+        #endif
+    }
+
     private static let ttyLaunch = ProviderTTYLaunchConfig(
         executableOverrideEnvironmentKey: "CLAUDE_CLI_PATH",
         bundledWatchdogHelperName: "CodexBarClaudeWatchdog",
@@ -123,7 +132,7 @@ public enum ClaudeProviderDescriptor {
                     probeLogOrder: 1,
                     notificationSimulationOrder: 1,
                     errorSimulationOrder: 1),
-                browserCookieOrder: ProviderBrowserCookieDefaults.defaultImportOrder,
+                browserCookieOrder: self.browserCookieOrder,
                 dashboardURL: "https://console.anthropic.com/settings/billing",
                 subscriptionDashboardURL: "https://claude.ai/settings/usage",
                 changelogURL: "https://github.com/anthropics/claude-code/releases",
@@ -180,6 +189,7 @@ public enum ClaudeProviderDescriptor {
                         menuCardStyle: .claude)
                 },
                 iconDecorations: [.notches],
+                reservesMissingSecondaryIconLane: true,
                 automaticSelectionPrioritizesExhaustedWindow: false,
                 menuBarWindowResolver: self.menuBarWindow,
                 planUtilizationSeriesResolver: { snapshot in
@@ -220,12 +230,7 @@ public enum ClaudeProviderDescriptor {
               context.snapshot.tertiary == nil,
               context.snapshot.primary == nil || context.snapshot.primary?.isSyntheticPlaceholder == true
         else { return .unhandled }
-        let usedPercent = max(0, min(100, (cost.used / cost.limit) * 100))
-        return .resolved(RateWindow(
-            usedPercent: usedPercent,
-            windowMinutes: nil,
-            resetsAt: cost.resetsAt,
-            resetDescription: nil))
+        return .resolved(cost.spendLimitWindow)
     }
 
     private static func resolveStrategies(context: ProviderFetchContext) async -> [any ProviderFetchStrategy] {

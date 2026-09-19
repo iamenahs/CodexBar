@@ -107,9 +107,9 @@ struct WidgetProviderPagerTests {
     // MARK: - Titles
 
     @Test
-    func `small tiles swap a long provider name for its short form instead of truncating`() {
+    func `small tiles retain the full provider name`() {
         #expect(ProviderTitle.text(for: .alibabatokenplan, size: .medium) == "Alibaba Token Plan")
-        #expect(ProviderTitle.text(for: .alibabatokenplan, size: .small) == "Token Plan")
+        #expect(ProviderTitle.text(for: .alibabatokenplan, size: .small) == "Alibaba Token Plan")
     }
 
     @Test
@@ -121,12 +121,10 @@ struct WidgetProviderPagerTests {
     }
 
     @Test
-    func `every provider title fits the compact budget on a small tile`() {
+    func `small tiles preserve the provider name`() {
         for provider in UsageProvider.allCases where ProviderChoice(provider: provider) != nil {
             let title = ProviderTitle.text(for: provider, size: .small)
-            #expect(
-                title.count <= ProviderTitle.compactCharacterBudget,
-                "\(provider.rawValue) renders as \"\(title)\"")
+            #expect(title == ProviderTitle.text(for: provider, size: .large))
         }
     }
 
@@ -148,7 +146,8 @@ struct WidgetProviderPagerTests {
         let display = CompactMetricFormatter.display(for: entry, metric: .credits)
 
         #expect(display.value == WidgetFormat.unavailable)
-        #expect(display.detail == "Not reported by Claude")
+        #expect(CompactMetricFormatter
+            .unavailableDetail(value: display.value, entry: entry) == "Not reported by Claude")
     }
 
     @Test

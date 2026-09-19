@@ -26,9 +26,6 @@ struct CodexBarSwitcherWidget: Widget {
         .configurationDisplayName("CodexBar Switcher")
         .description("Usage widget with a provider switcher.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
-        // The tiles own their padding (`WidgetLayout.tilePadding`). Without this, WidgetKit adds
-        // its default content margins on top and every tile floats well inside its own edges.
-        .contentMarginsDisabled()
     }
 }
 
@@ -46,9 +43,6 @@ struct CodexBarUsageWidget: Widget {
         .configurationDisplayName("CodexBar Usage")
         .description("Session and weekly usage with credits and costs.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
-        // The tiles own their padding (`WidgetLayout.tilePadding`). Without this, WidgetKit adds
-        // its default content margins on top and every tile floats well inside its own edges.
-        .contentMarginsDisabled()
     }
 }
 
@@ -66,9 +60,6 @@ struct CodexBarHistoryWidget: Widget {
         .configurationDisplayName("CodexBar History")
         .description("Usage history chart with recent totals.")
         .supportedFamilies([.systemMedium, .systemLarge])
-        // The tiles own their padding (`WidgetLayout.tilePadding`). Without this, WidgetKit adds
-        // its default content margins on top and every tile floats well inside its own edges.
-        .contentMarginsDisabled()
     }
 }
 
@@ -86,9 +77,6 @@ struct CodexBarCompactWidget: Widget {
         .configurationDisplayName("CodexBar Metric")
         .description("Compact widget for credits or cost.")
         .supportedFamilies([.systemSmall])
-        // The tiles own their padding (`WidgetLayout.tilePadding`). Without this, WidgetKit adds
-        // its default content margins on top and every tile floats well inside its own edges.
-        .contentMarginsDisabled()
     }
 }
 

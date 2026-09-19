@@ -16,6 +16,21 @@ extension CostUsageScanner {
         let priorityGroups: Set<CodexDayModelKey>
     }
 
+    static func codexExcessPricingRowGroups(_ usage: CostUsageFileUsage) -> Set<CodexDayModelKey> {
+        let grouped = Dictionary(grouping: usage.codexRows ?? []) {
+            CodexDayModelKey(day: $0.day, model: $0.model)
+        }
+        return Set(grouped.compactMap { key, rows in
+            let packed = usage.days[key.day]?[key.model] ?? []
+            let target = CodexRowTokenTotals(
+                input: max(0, packed[safe: 0] ?? 0),
+                cached: max(0, packed[safe: 1] ?? 0),
+                output: max(0, packed[safe: 2] ?? 0))
+            var total = CodexRowTokenTotals()
+            return !rows.allSatisfy { total.add($0) } || total.exceeds(target) ? key : nil
+        })
+    }
+
     static func codexCanonicalPricingRows(_ usage: CostUsageFileUsage) -> CodexCanonicalPricingRows {
         let persistedRows = usage.codexRows ?? []
         let rowsByGroup = Dictionary(grouping: persistedRows) {
@@ -57,6 +72,16 @@ extension CostUsageScanner {
             rows: reconciledRows,
             range: range,
             priorityTurns: priorityTurns)
+        // The persisted maps are derived from the rows' own `pricingMode`, while the report also
+        // consults the trace database. A turn the trace reports as priority after its rows were
+        // persisted as standard is a tier-classification difference, not a row-ownership problem,
+        // so retention is judged against both splits and only a group that matches neither counts
+        // as mismatched. A wrongly retained row set still fails both, because the persisted totals
+        // are canonical for the file and neither classification changes how many tokens the rows carry.
+        let retainedModeTokens = self.codexModeTokenMaps(
+            rows: reconciledRows,
+            range: range,
+            priorityTurns: [:])
         var mismatchGroups = Set<CodexDayModelKey>()
         var priorityGroups = Set<CodexDayModelKey>()
         for (day, models) in usage.days {
@@ -76,11 +101,13 @@ extension CostUsageScanner {
                 // Copied fork prefixes can stale these legacy maps too. Only a map that is
                 // independently canonical for its file may constrain retained row ownership.
                 guard persistedModeTotal == canonicalTotal else { continue }
-                let rowStandard = reconciledModeTokens.standard?[day]?[model] ?? 0
-                let rowPriority = reconciledModeTokens.priority?[day]?[model] ?? 0
-                if rowStandard != max(0, persistedStandard ?? 0)
-                    || rowPriority != max(0, persistedPriority ?? 0)
-                {
+                let expectedStandard = max(0, persistedStandard ?? 0)
+                let expectedPriority = max(0, persistedPriority ?? 0)
+                let matchesReconciled = (reconciledModeTokens.standard?[day]?[model] ?? 0) == expectedStandard
+                    && (reconciledModeTokens.priority?[day]?[model] ?? 0) == expectedPriority
+                let matchesRetained = (retainedModeTokens.standard?[day]?[model] ?? 0) == expectedStandard
+                    && (retainedModeTokens.priority?[day]?[model] ?? 0) == expectedPriority
+                if !matchesReconciled, !matchesRetained {
                     mismatchGroups.insert(key)
                 }
             }
@@ -104,7 +131,8 @@ extension CostUsageScanner {
         priorityTurns: [String: CodexPriorityTurnMetadata],
         modelsDevCatalog: ModelsDevCatalog?,
         modelsDevCacheRoot: URL?,
-        customPricing: CostUsageCustomPricing? = nil) -> Set<CodexDayModelKey>
+        customPricing: CostUsageCustomPricing? = nil,
+        pricingResolver: CostUsagePricing.CodexResolver? = nil) -> Set<CodexDayModelKey>
     {
         let rowsByGroup = Dictionary(grouping: usage.codexRows ?? []) {
             CodexDayModelKey(day: $0.day, model: $0.model)
@@ -120,7 +148,8 @@ extension CostUsageScanner {
                 priorityTurns: priorityTurns,
                 modelsDevCatalog: modelsDevCatalog,
                 modelsDevCacheRoot: modelsDevCacheRoot,
-                customPricing: customPricing)
+                customPricing: customPricing,
+                pricingResolver: pricingResolver)
             return breakdown.hasIncompletePricing ? group : nil
         })
     }
@@ -169,18 +198,7 @@ extension CostUsageScanner {
             }
             return rows
         }
-        guard allRowsTotal.exceeds(target) else { return nil }
-
-        var suffixTotal = CodexRowTokenTotals()
-        for index in rows.indices.reversed() {
-            guard suffixTotal.add(rows[index]) else { return nil }
-            if suffixTotal == target {
-                return Array(rows[index...])
-            }
-            if suffixTotal.exceeds(target) {
-                return nil
-            }
-        }
+        // Matching a suffix to aggregate tokens cannot establish the original request boundaries.
         return nil
     }
 }

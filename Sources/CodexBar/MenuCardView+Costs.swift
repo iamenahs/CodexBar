@@ -37,11 +37,11 @@ struct ProviderCostContent: View {
                             .layoutPriority(1)
                     }
                 }
-                if let percentUsed = self.section.percentUsed {
+                if let percent = self.section.displayPercent {
                     UsageProgressBar(
-                        percent: percentUsed,
+                        percent: percent,
                         tint: self.progressColor,
-                        accessibilityLabel: L("Extra usage spent"))
+                        accessibilityLabel: self.section.progressAccessibilityLabel)
                 }
                 HStack(alignment: .firstTextBaseline) {
                     Text(self.section.spendLine).font(.footnote).lineLimit(1)
@@ -68,6 +68,14 @@ extension UsageMenuCardView.Model.ProviderCostSection {
         case inlineValue
     }
 
+    var displayPercent: Double? {
+        self.percentUsed.map { self.percentStyle == .used ? $0 : 100 - $0 }
+    }
+
+    var progressAccessibilityLabel: String {
+        self.percentStyle == .used ? L("Extra usage spent") : self.percentStyle.accessibilityLabel
+    }
+
     init(
         title: String,
         percentUsed: Double?,
@@ -75,7 +83,8 @@ extension UsageMenuCardView.Model.ProviderCostSection {
         percentLine: String?,
         balanceLine: String? = nil,
         presentation: Presentation = .detail,
-        showsInProviderDetails: Bool = true)
+        showsInProviderDetails: Bool = true,
+        percentStyle: UsageMenuCardView.Model.PercentStyle = .used)
     {
         self.init(
             title: title,
@@ -85,7 +94,8 @@ extension UsageMenuCardView.Model.ProviderCostSection {
             balanceLine: balanceLine,
             personalSpendLine: nil,
             presentation: presentation,
-            showsInProviderDetails: showsInProviderDetails)
+            showsInProviderDetails: showsInProviderDetails,
+            percentStyle: percentStyle)
     }
 }
 
@@ -103,16 +113,10 @@ extension UsageMenuCardView.Model {
             isClaudeAdminAPI
         case .clawRouter:
             (cost?.limit ?? 0) <= 0
-        case .generic, .hidden, .extraUsageBalance, .zenBalance, .pointsBalance, .prepaidCredits,
+        case .generic, .hidden, .extraUsageBalance, .creditsUsage, .zenBalance, .pointsBalance, .prepaidCredits,
              .payAsYouGoBalance:
             false
         }
-    }
-
-    static func isRequiredOpenCodeZenBalance(_ snapshot: UsageSnapshot?) -> Bool {
-        snapshot?.primary == nil &&
-            snapshot?.secondary == nil &&
-            snapshot?.providerCost?.period == "Zen balance"
     }
 
     static func tokenUsageSnapshot(input: Input) -> CostUsageTokenSnapshot? {
@@ -138,10 +142,10 @@ extension UsageMenuCardView.Model {
             return nil
         }
         if let credits {
-            if let creditLimit = credits.codexCreditLimit {
-                return UsageFormatter.creditsString(from: creditLimit.remaining)
+            if let remaining = credits.displayRemaining {
+                return UsageFormatter.creditsString(from: remaining)
             }
-            return UsageFormatter.creditsString(from: credits.remaining)
+            return "\(L("Credits")) · \(L("Balance")): \(L("Unavailable"))"
         }
         if let error, !error.isEmpty {
             return error.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -150,15 +154,18 @@ extension UsageMenuCardView.Model {
     }
 
     static func creditsProgressPercent(credits: CreditsSnapshot?) -> Double? {
-        credits?.codexCreditLimit?.remainingPercent
+        guard credits?.hasWorkspaceBalance != true else { return nil }
+        return credits?.codexCreditLimit?.remainingPercent
     }
 
     static func creditsScaleText(credits: CreditsSnapshot?) -> String? {
+        guard credits?.hasWorkspaceBalance != true else { return nil }
         guard let limit = credits?.codexCreditLimit else { return nil }
         return L("of %@", UsageFormatter.creditsNumberString(from: limit.limit))
     }
 
     static func codexCreditLimitDetail(credits: CreditsSnapshot?, now: Date) -> String? {
+        guard credits?.hasWorkspaceBalance != true else { return nil }
         guard let limit = credits?.codexCreditLimit else { return nil }
         var parts = [
             L("%@ used", UsageFormatter.creditsNumberString(from: limit.used)),
@@ -176,7 +183,8 @@ extension UsageMenuCardView.Model {
         comparisonPeriodsEnabled: Bool,
         snapshot: CostUsageTokenSnapshot?,
         error: String?,
-        preferredCurrencyCode: String = "auto") -> TokenUsageSection?
+        preferredCurrencyCode: String = "auto",
+        calendar: Calendar = .current) -> TokenUsageSection?
     {
         guard ProviderDescriptorRegistry.descriptor(for: provider).tokenCost.supportsTokenCost else {
             return nil
@@ -209,8 +217,16 @@ extension UsageMenuCardView.Model {
                 preferredCurrency: preferredCurrencyCode,
                 providerCurrency: snapshot.currencyCode)
         } ?? "—"
-        let fallbackTokens = snapshot.daily.compactMap(\.totalTokens).reduce(0, +)
-        let monthTokensValue = snapshot.last30DaysTokens ?? (fallbackTokens > 0 ? fallbackTokens : nil)
+        let fallbackTokens: Int? = {
+            var sum = 0
+            for t in snapshot.daily.compactMap(\.totalTokens) {
+                let (res, of) = sum.addingReportingOverflow(t)
+                if of { return nil }
+                sum = res
+            }
+            return sum > 0 ? sum : nil
+        }()
+        let monthTokensValue = snapshot.last30DaysTokens ?? fallbackTokens
         let monthTokens = monthTokensValue.map { UsageFormatter.tokenCountString($0) }
         let windowLabel = if let historyLabel = snapshot.historyLabel {
             historyLabel
@@ -237,14 +253,18 @@ extension UsageMenuCardView.Model {
                 providerCurrency: snapshot.currencyCode)
             return String(format: L("Cursor-metered: %@ (%@)"), amount, windowLabel.lowercased())
         }
+        let incompleteCount = CostUsageIncompleteRequests.sum(snapshot.daily.map(\.incompleteRequestCount))
+        let todayIncompleteCount = snapshot.summary(forLastDays: 1, calendar: calendar).incompleteRequestCount
         let err = (error?.isEmpty ?? true) ? nil : error
+        let hints = [Self.tokenUsageHint(provider: provider), UsageFormatter.incompleteUsageNote(incompleteCount)]
+            .compactMap(\.self)
         return TokenUsageSection(
             isRefreshing: isRefreshing,
-            sessionLine: sessionLine,
-            monthLine: monthLine,
+            sessionLine: sessionLine + UsageFormatter.incompleteUsageSuffix(todayIncompleteCount),
+            monthLine: monthLine + UsageFormatter.incompleteUsageSuffix(incompleteCount),
             meteredLine: meteredLine,
             comparisonLines: comparisonPeriodsEnabled
-                ? snapshot.comparisonSummaries().map {
+                ? snapshot.comparisonSummaries(calendar: calendar).map {
                     Self.costWindowLine(
                         summary: $0,
                         currencyCode: UsageFormatter.effectiveCurrencyCode(
@@ -253,7 +273,7 @@ extension UsageMenuCardView.Model {
                         sourceCurrencyCode: snapshot.currencyCode)
                 }
                 : [],
-            hintLine: Self.tokenUsageHint(provider: provider),
+            hintLine: hints.isEmpty ? nil : hints.joined(separator: "\n"),
             errorLine: err,
             errorCopyText: (error?.isEmpty ?? true) ? nil : error)
     }
@@ -270,12 +290,13 @@ extension UsageMenuCardView.Model {
                 preferredCurrency: currencyCode,
                 providerCurrency: sourceCurrencyCode ?? currencyCode)
         } ?? "—"
-        guard let totalTokens = summary.totalTokens else { return "\(label): \(cost)" }
+        let suffix = UsageFormatter.incompleteUsageSuffix(summary.incompleteRequestCount)
+        guard let totalTokens = summary.totalTokens else { return "\(label): \(cost)\(suffix)" }
         return String(
             format: L("%@: %@ · %@ tokens"),
             label,
             cost,
-            UsageFormatter.tokenCountString(totalTokens))
+            UsageFormatter.tokenCountString(totalTokens)) + suffix
     }
 
     static func tokenUsageHint(provider: UsageProvider) -> String? {
@@ -397,6 +418,7 @@ extension UsageMenuCardView.Model {
     static func providerCostSection(
         cost: ProviderCostSnapshot?,
         style: ProviderCostMenuCardStyle,
+        percentStyle: PercentStyle = .used,
         isClaudeAdminAPI: Bool = false,
         preferredCurrencyCode: String = "auto") -> ProviderCostSection?
     {
@@ -468,6 +490,10 @@ extension UsageMenuCardView.Model {
                 percentLine: nil)
         }
 
+        if style == .creditsUsage {
+            return Self.creditsUsageSection(cost: cost, percentStyle: percentStyle)
+        }
+
         if style == .claude {
             if isClaudeAdminAPI {
                 let spend = formatCost(cost.used)
@@ -504,7 +530,8 @@ extension UsageMenuCardView.Model {
                 spendLine: "\(periodLabel): \(used) / \(limit)",
                 percentLine: String(format: L("%.0f%% used"), min(100, max(0, percentUsed))),
                 balanceLine: balanceLine,
-                showsInProviderDetails: false)
+                showsInProviderDetails: false,
+                percentStyle: percentStyle)
         }
 
         if style == .apiSpend {
@@ -566,6 +593,38 @@ extension UsageMenuCardView.Model {
             personalSpendLine: personalSpendLine)
     }
 
+    private static func creditsUsageSection(
+        cost: ProviderCostSnapshot,
+        percentStyle: PercentStyle) -> ProviderCostSection?
+    {
+        if cost.limit <= 0 {
+            guard let balance = cost.balance else { return nil }
+            return ProviderCostSection(
+                title: L("Extra usage"),
+                percentUsed: nil,
+                spendLine: "\(L("Balance")): \(UsageFormatter.creditsNumberString(from: balance))",
+                percentLine: nil,
+                presentation: .inlineValue,
+                showsInProviderDetails: false)
+        }
+
+        let used = UsageFormatter.creditsNumberString(from: cost.used)
+        let limit = UsageFormatter.creditsNumberString(from: cost.limit)
+        let percentUsed = Self.clamped((cost.used / cost.limit) * 100)
+        let periodLabel = Self.localizedPeriodLabel(cost.period ?? "This month")
+        let balanceLine = cost.balance.map {
+            "\(L("Balance")): \(UsageFormatter.creditsNumberString(from: $0))"
+        }
+        return ProviderCostSection(
+            title: L("Extra usage"),
+            percentUsed: percentUsed,
+            spendLine: "\(periodLabel): \(used) / \(limit)",
+            percentLine: String(format: L("%.0f%% used"), min(100, max(0, percentUsed))),
+            balanceLine: balanceLine,
+            showsInProviderDetails: false,
+            percentStyle: percentStyle)
+    }
+
     private static func localizedPeriodLabel(_ label: String) -> String {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
         switch trimmed.lowercased() {
@@ -582,5 +641,15 @@ extension UsageMenuCardView.Model {
 
     static func clamped(_ value: Double) -> Double {
         min(100, max(0, value))
+    }
+}
+
+extension UsageFormatter {
+    static func incompleteUsageSuffix(_ count: Int) -> String {
+        count > 0 ? " · \(L("Incomplete"))" : ""
+    }
+
+    static func incompleteUsageNote(_ count: Int) -> String? {
+        count > 0 ? L("Excluded requests with missing final usage: %d", count) : nil
     }
 }

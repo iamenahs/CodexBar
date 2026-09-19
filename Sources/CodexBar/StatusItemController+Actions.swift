@@ -31,19 +31,6 @@ extension StatusItemController {
 extension StatusItemController: StatusItemMenuPersistentActionDelegate {
     // MARK: - Actions reachable from menus
 
-    func refreshStore(
-        forceTokenUsage: Bool,
-        refreshOpenMenusWhenComplete: Bool = true,
-        interaction: ProviderInteraction = .userInitiated)
-    {
-        Task {
-            await self.performStoreRefresh(
-                forceTokenUsage: forceTokenUsage,
-                refreshOpenMenusWhenComplete: refreshOpenMenusWhenComplete,
-                interaction: interaction)
-        }
-    }
-
     func performStoreRefresh(
         forceTokenUsage: Bool,
         refreshOpenMenusWhenComplete: Bool,
@@ -184,12 +171,13 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
             originatingMenuInteractionGeneration: originatingMenuInteractionGeneration)
     }
 
-    private func startManualRefresh(
+    func startManualRefresh(
         for provider: ProviderInstanceID?,
         originatingMenuID: ObjectIdentifier?,
         originatingMenuInteractionGeneration: Int?)
     {
         let firstPartyProvider = provider?.firstPartyProvider
+        let tracksFirstPartyCards = provider == nil || firstPartyProvider != nil
         let scope: ManualRefreshScope = provider.map(ManualRefreshScope.provider) ?? .global
         let scopedRefreshInFlight = provider.map { self.store.refreshingProviders.contains($0) }
             ?? !self.store.refreshingProviders.isEmpty
@@ -206,7 +194,7 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
               !scopedRefreshInFlight
         else { return }
 
-        let frozenModels = self.frozenManualRefreshMenuCardModels()
+        let frozenModels = tracksFirstPartyCards ? self.frozenManualRefreshMenuCardModels() : [:]
         let viewportRestoreRequests = self.armManualRefreshViewportRestoreRequests(
             originatingMenuID: originatingMenuID,
             originatingMenuInteractionGeneration: originatingMenuInteractionGeneration)
@@ -215,7 +203,9 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
             var completed = false
             defer {
                 self.manualRefreshTasks[scope] = nil
-                self.menuCardRefreshMonitor.endManualRefresh(for: firstPartyProvider)
+                if tracksFirstPartyCards {
+                    self.menuCardRefreshMonitor.endManualRefresh(for: firstPartyProvider)
+                }
                 self.updatePersistentRefreshItemsEnabled()
                 if completed {
                     self.scheduleCompletedManualRefreshViewportRestore(viewportRestoreRequests)
@@ -239,6 +229,12 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
                     for: provider,
                     refreshOpenMenusWhenComplete: true,
                     interaction: .userInitiated)
+            } else if let provider {
+                await self.withProviderInteraction(.userInitiated) {
+                    await self.store.refreshUserPlugin(provider)
+                    guard !Task.isCancelled, !self.hasPreparedForAppShutdown else { return }
+                    self.refreshOpenMenusAfterUserPluginRefresh(provider)
+                }
             } else {
                 await self.performStoreRefresh(
                     enrichmentMode: .forcedBackground,
@@ -249,16 +245,21 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
             completed = true
         }
         self.manualRefreshTasks[scope] = task
-        self.menuCardRefreshMonitor.beginManualRefresh(frozenModels: frozenModels, provider: firstPartyProvider)
+        if tracksFirstPartyCards {
+            self.menuCardRefreshMonitor.beginManualRefresh(frozenModels: frozenModels, provider: firstPartyProvider)
+        }
         self.updatePersistentRefreshItemsEnabled()
     }
 
-    private func manualRefreshProvider(for menu: NSMenu?) -> ProviderInstanceID? {
+    func manualRefreshProvider(for menu: NSMenu?) -> ProviderInstanceID? {
         guard let menu else { return nil }
         if self.shouldMergeIcons {
             guard self.mergedMenu == nil || menu === self.mergedMenu else { return nil }
-            guard !self.isMergedOverviewSelected(in: menu) else { return nil }
-            return self.resolvedMenuProvider()?.instanceID
+            let enabledProviders = self.store.enabledFirstPartyProvidersForDisplay()
+            if let selection = self.resolvedMergedMenuSelection(enabledProviders: enabledProviders) {
+                return selection.instanceID
+            }
+            return self.resolvedMenuProvider(enabledProviders: enabledProviders)?.instanceID
         }
         return self.menuProviders[ObjectIdentifier(menu)]
     }
@@ -386,7 +387,7 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
 
         if provider == .qoder {
             return QoderProviderDescriptor.dashboardURL(
-                settings: self.settings.qoderSettingsSnapshot(tokenOverride: nil),
+                settings: self.settings.resolvedCookieSettings(provider: provider, tokenOverride: nil),
                 sourceLabel: self.store.sourceLabel(for: .qoder))
         }
 
@@ -569,6 +570,16 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         self.openSettings(pane: nil)
     }
 
+    @objc func showProviderSettings(_ sender: NSMenuItem) {
+        guard let rawProvider = sender.representedObject as? String,
+              let provider = UsageProvider(rawValue: rawProvider)
+        else {
+            self.menuLogger.error("Provider settings action is missing a valid provider")
+            return
+        }
+        self.openSettings(pane: .provider(provider.instanceID))
+    }
+
     @objc func showSettingsAbout() {
         self.openSettings(pane: .about)
     }
@@ -728,7 +739,7 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         }
     }
 
-    func presentCodexLoginResult(_ result: CodexLoginRunner.Result) {
+    func presentCodexLoginResult(_ result: CLILoginRunner.Result) {
         guard let info = CodexLoginAlertPresentation.alertInfo(for: result) else { return }
         self.presentLoginAlert(title: info.title, message: info.message)
     }
@@ -770,9 +781,10 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         }
     }
 
-    func describe(_ outcome: CodexLoginRunner.Result.Outcome) -> String {
+    func describe(_ outcome: CLILoginRunner.Result.Outcome) -> String {
         switch outcome {
         case .success: "success"
+        case .cancelled: "cancelled"
         case .timedOut: "timedOut"
         case let .failed(status): "failed(status: \(status))"
         case .missingBinary: "missingBinary"
@@ -795,6 +807,7 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         case .success: "success"
         case .missingBinary: "missingBinary"
         case let .launchFailed(message): "launchFailed(\(message))"
+        case .consumerTierDeprecated: "consumerTierDeprecated"
         }
     }
 
@@ -813,9 +826,18 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         }
     }
 
-    func presentGeminiLoginResult(_ result: GeminiLoginRunner.Result) {
-        guard let info = Self.geminiLoginAlertInfo(for: result) else { return }
-        self.presentLoginAlert(title: info.title, message: info.message)
+    /// Returns `true` when the alert offered a recovery action and the user chose it.
+    @discardableResult
+    func presentGeminiLoginResult(_ result: GeminiLoginRunner.Result) -> Bool {
+        guard let info = Self.geminiLoginAlertInfo(for: result) else { return false }
+        guard let confirmButtonTitle = info.confirmButtonTitle else {
+            self.presentLoginAlert(title: info.title, message: info.message)
+            return false
+        }
+        return self.presentLoginConfirmation(
+            title: info.title,
+            message: info.message,
+            confirmButtonTitle: confirmButtonTitle)
     }
 
     func presentAntigravityLoginResult(_ result: AntigravityLoginRunner.Result) {
@@ -826,6 +848,8 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
     struct LoginAlertInfo: Equatable {
         let title: String
         let message: String
+        /// When set, the alert offers this action alongside Cancel and reports whether it was chosen.
+        var confirmButtonTitle: String?
     }
 
     nonisolated static func geminiLoginAlertInfo(for result: GeminiLoginRunner.Result) -> LoginAlertInfo? {
@@ -838,6 +862,12 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
                 message: L("Install the Gemini CLI (npm i -g @google/gemini-cli) and try again."))
         case let .launchFailed(message):
             LoginAlertInfo(title: L("Could not open Terminal for Gemini"), message: message)
+        case .consumerTierDeprecated:
+            LoginAlertInfo(
+                title: L("Gemini CLI login is no longer supported"),
+                message: GeminiConsumerTierMigration.deprecationError + "\n\n"
+                    + GeminiConsumerTierMigration.loginSwitchAccountPrompt,
+                confirmButtonTitle: L("Switch Account…"))
         }
     }
 
@@ -856,6 +886,18 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         case let .failed(message):
             LoginAlertInfo(title: L("Antigravity login failed"), message: message)
         }
+    }
+
+    /// Cancel is the default button on purpose: confirming clears stored provider credentials, so a
+    /// stray Return keypress must not destroy them.
+    func presentLoginConfirmation(title: String, message: String, confirmButtonTitle: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = L(title)
+        alert.informativeText = L(message)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: L("Cancel"))
+        alert.addButton(withTitle: confirmButtonTitle)
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     func presentLoginAlert(title: String, message: String) {

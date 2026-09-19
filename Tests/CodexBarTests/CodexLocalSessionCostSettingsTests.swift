@@ -29,17 +29,7 @@ struct CodexLocalSessionCostSettingsTests {
         #expect(fixture.settings.isCostUsageEffectivelyEnabled(for: .codex))
         #expect(!fixture.settings.isCostUsageEffectivelyEnabled(for: .claude))
         #expect(toggles.contains(where: { $0.id == "codex-historical-tracking" }))
-        let sparkToggle = try #require(toggles.first(where: { $0.id == "codex-spark-usage-visible" }))
-        #expect(sparkToggle.title == "Show Codex Spark usage")
-        #expect(sparkToggle.subtitle.contains("menu and provider preview"))
-        #expect(sparkToggle.binding.wrappedValue)
-        #expect(sparkToggle.isEnabled?() == true)
-
-        sparkToggle.binding.wrappedValue = false
-        #expect(fixture.settings.codexSparkUsageVisible == false)
-
-        fixture.settings.showOptionalCreditsAndExtraUsage = false
-        #expect(sparkToggle.isEnabled?() == false)
+        #expect(!toggles.contains(where: { $0.id == "codex-spark-usage-visible" }))
     }
 
     @Test
@@ -90,17 +80,16 @@ struct CodexLocalSessionCostSettingsTests {
     }
 
     private func makeSettingsFixture(suite: String) throws -> Fixture {
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defaults.removePersistentDomain(forName: suite)
-        let settings = SettingsStore(
-            userDefaults: defaults,
-            configStore: testConfigStore(suiteName: suite),
-            zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+        let settings = testSettingsStore(suiteName: suite)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        settings._test_managedCodexAccountStoreURL = root.appendingPathComponent("accounts.json")
+        let environment = ["HOME": root.path, "CODEX_HOME": root.appendingPathComponent("codex").path]
         let store = UsageStore(
-            fetcher: UsageFetcher(environment: [:]),
-            browserDetection: BrowserDetection(cacheTTL: 0),
-            settings: settings)
+            fetcher: UsageFetcher(environment: environment),
+            browserDetection: BrowserDetection(homeDirectory: root.path, cacheTTL: 0),
+            settings: settings,
+            startupBehavior: .testing,
+            environmentBase: environment)
         return Fixture(settings: settings, store: store)
     }
 
@@ -118,16 +107,6 @@ struct CodexLocalSessionCostSettingsTests {
                 provider: provider,
                 settings: settings,
                 store: store,
-                boolBinding: { keyPath in
-                    Binding(
-                        get: { settings[keyPath: keyPath] },
-                        set: { settings[keyPath: keyPath] = $0 })
-                },
-                stringBinding: { keyPath in
-                    Binding(
-                        get: { settings[keyPath: keyPath] },
-                        set: { settings[keyPath: keyPath] = $0 })
-                },
                 statusText: { id in state.statusByID[id] },
                 setStatusText: { id, text in
                     if let text {

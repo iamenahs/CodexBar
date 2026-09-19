@@ -33,16 +33,6 @@ struct GeminiProviderMigrationSettingsTests {
             provider: .gemini,
             settings: settings,
             store: store,
-            boolBinding: { keyPath in
-                Binding(
-                    get: { settings[keyPath: keyPath] },
-                    set: { settings[keyPath: keyPath] = $0 })
-            },
-            stringBinding: { keyPath in
-                Binding(
-                    get: { settings[keyPath: keyPath] },
-                    set: { settings[keyPath: keyPath] = $0 })
-            },
             statusText: { _ in nil },
             setStatusText: { _, _ in },
             lastAppActiveRunAt: { _ in nil },
@@ -83,6 +73,52 @@ struct GeminiProviderMigrationSettingsTests {
 
         #expect(actions.map(\.id) == ["gemini-antigravity-migration"])
         #expect(settings.isProviderEnabled(provider: .antigravity, metadata: antigravity) == wasEnabled)
+    }
+
+    @Test
+    func `google shutdown observation arms the login guard`() {
+        let settings = self.makeSettings()
+        let store = self.makeStore(settings: settings)
+
+        store.observeGeminiConsumerTierDeprecation(from: GeminiStatusProbeError.consumerTierDeprecated)
+
+        #expect(store.geminiObservedConsumerTierDeprecation)
+        #expect(store.geminiObservedGoogleConsumerTierShutdown)
+    }
+
+    @Test
+    func `local antigravity handoff does not arm the login guard`() {
+        let settings = self.makeSettings()
+        let store = self.makeStore(settings: settings)
+
+        store.observeGeminiConsumerTierDeprecation(
+            from: GeminiStatusProbeError.oauthCredentialsUnavailableWithAntigravity)
+
+        #expect(store.geminiObservedConsumerTierDeprecation)
+        #expect(!store.geminiObservedGoogleConsumerTierShutdown)
+    }
+
+    @Test
+    func `local handoff after a google shutdown keeps the login guard armed`() {
+        let settings = self.makeSettings()
+        let store = self.makeStore(settings: settings)
+        store.observeGeminiConsumerTierDeprecation(from: GeminiStatusProbeError.consumerTierDeprecated)
+
+        store.observeGeminiConsumerTierDeprecation(
+            from: GeminiStatusProbeError.oauthCredentialsUnavailableWithAntigravity)
+
+        #expect(store.geminiObservedGoogleConsumerTierShutdown)
+    }
+
+    @Test
+    func `clearing the observation disarms the login guard`() {
+        let settings = self.makeSettings()
+        let store = self.makeStore(settings: settings)
+        store.observeGeminiConsumerTierDeprecation(from: GeminiStatusProbeError.consumerTierDeprecated)
+
+        store.clearGeminiConsumerTierDeprecationObservation()
+
+        #expect(!store.geminiObservedGoogleConsumerTierShutdown)
     }
 
     @Test

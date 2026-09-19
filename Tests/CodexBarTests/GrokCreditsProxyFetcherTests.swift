@@ -50,7 +50,89 @@ struct GrokCreditsProxyFetcherTests {
         #expect(GrokCreditsProxyStubURLProtocol.requests.count == 1)
         #expect(snapshot.usedPercent == 12.5)
         #expect(snapshot.resetsAt == expectedReset)
+        #expect(snapshot.windowMinutes == 10080)
         #expect(snapshot.subscriptionTier == nil)
+    }
+
+    @Test
+    func `measures only matching valid period bounds`() throws {
+        let now = try Self.date("2026-08-12T00:00:00Z")
+        let cases: [(String, Int?)] = [
+            (#"""
+            "billingPeriodStart":"2026-08-06T00:00:00Z","billingPeriodEnd":"2026-08-13T00:00:00Z"
+            """#, 10080),
+            (#"""
+            "currentPeriod":{"start":"2026-07-13T00:00:00Z","end":"2026-08-13T00:00:00Z"}
+            """#, 44640),
+            (#"""
+            "currentPeriod":{"end":"2026-08-13T00:00:00Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"end":"2026-08-13T00:00:00Z"},
+            "billingPeriodStart":"2026-07-13T00:00:00Z","billingPeriodEnd":"2026-08-14T00:00:00Z"
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"invalid","end":"2026-08-13T00:00:00Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"2026-08-14T00:00:00Z","end":"2026-08-21T00:00:00Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"2026-08-11T00:00:00Z","end":"2026-08-10T00:00:00Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"2026-08-11T00:00:00Z","end":"2026-08-11T00:00:00Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"2026-08-11T00:00:00Z","end":"2026-08-11T00:00:30Z"}
+            """#, nil),
+            (#"""
+            "currentPeriod":{"start":"2026-07-01T00:00:00Z","end":"invalid"},
+            "billingPeriodStart":"2026-08-06T00:00:00Z","billingPeriodEnd":"2026-08-13T00:00:00Z"
+            """#, 10080),
+        ]
+        for (period, expectedMinutes) in cases {
+            let data = Data("{\"config\":{\"creditUsagePercent\":90,\(period)}}".utf8)
+            let snapshot = try GrokCreditsProxyFetcher.parseSnapshot(data, now: now)
+            #expect(snapshot.usedPercent == 90)
+            #expect(snapshot.windowMinutes == expectedMinutes)
+        }
+    }
+
+    @Test
+    func `plan overlay and unknown usage enrichment retain proxy period bounds`() async throws {
+        let now = try Self.date("2026-08-12T00:00:00Z")
+        let proxy = try GrokCreditsProxyFetcher.parseSnapshot(Data("""
+        {"config":{"currentPeriod":{"start":"2026-08-06T00:00:00Z","end":"2026-08-13T00:00:00Z"}}}
+        """.utf8), now: now).applying(subscriptionTier: "SuperGrok Heavy")
+        #expect(proxy.usedPercent == nil)
+        #expect(proxy.windowMinutes == 10080)
+        let enriched = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            proxy,
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                GrokWebBillingSnapshot(usedPercent: 90, resetsAt: now.addingTimeInterval(3600))
+            }).snapshot
+        #expect(enriched.usedPercent == 90)
+        #expect(enriched.resetsAt == proxy.resetsAt)
+        #expect(enriched.windowMinutes == 10080)
+        #expect(enriched.subscriptionTier == "SuperGrok Heavy")
+    }
+
+    @Test
+    func `completion never pairs a duration with a different reset`() {
+        let original = GrokWebBillingSnapshot(
+            usedPercent: 90,
+            resetsAt: Date(timeIntervalSince1970: 1_000_000),
+            windowMinutes: 10080)
+        let replaced = original.completing(with: GrokWebBillingSnapshot(
+            usedPercent: nil,
+            resetsAt: Date(timeIntervalSince1970: 2_000_000)))
+        #expect(replaced.resetsAt == Date(timeIntervalSince1970: 2_000_000))
+        #expect(replaced.windowMinutes == nil)
+        let unchanged = original.completing(with: GrokWebBillingSnapshot(usedPercent: nil, resetsAt: nil))
+        #expect(unchanged.resetsAt == original.resetsAt)
+        #expect(unchanged.windowMinutes == 10080)
     }
 
     @Test
@@ -96,7 +178,7 @@ struct GrokCreditsProxyFetcherTests {
     }
 
     @Test
-    func `treats a period without usage as zero percent`() throws {
+    func `treats a period without usage as unknown`() throws {
         let snapshot = try GrokCreditsProxyFetcher.parseSnapshot(
             Data(
                 """
@@ -109,7 +191,7 @@ struct GrokCreditsProxyFetcherTests {
                 """.utf8))
         let expectedReset = try Self.date("2026-08-13T00:00:00.123Z")
 
-        #expect(snapshot.usedPercent == 0)
+        #expect(snapshot.usedPercent == nil)
         #expect(snapshot.resetsAt == expectedReset)
         #expect(snapshot.subscriptionTier == nil)
     }
@@ -134,7 +216,7 @@ struct GrokCreditsProxyFetcherTests {
         let expectedReset = try Self.date("2026-08-23T18:42:45.537749+00:00")
 
         #expect(snapshot.subscriptionTier == "SuperGrok Heavy")
-        #expect(snapshot.usedPercent == 0)
+        #expect(snapshot.usedPercent == nil)
         #expect(snapshot.resetsAt == expectedReset)
     }
 
@@ -184,7 +266,7 @@ struct GrokCreditsProxyFetcherTests {
                 """.utf8))
         let expectedReset = try Self.date("2026-08-13T00:00:00Z")
 
-        #expect(snapshot.usedPercent == 0)
+        #expect(snapshot.usedPercent == nil)
         #expect(snapshot.subscriptionTier == "SuperGrok Heavy")
         #expect(snapshot.resetsAt == expectedReset)
     }
@@ -231,7 +313,7 @@ struct GrokCreditsProxyFetcherTests {
                 """.utf8))
         let expectedReset = try Self.date("2026-08-13T00:00:00Z")
 
-        #expect(snapshot.usedPercent == 0)
+        #expect(snapshot.usedPercent == nil)
         #expect(snapshot.resetsAt == expectedReset)
     }
 
@@ -300,13 +382,16 @@ struct GrokCreditsProxyFetcherTests {
             },
             legacyBilling: {
                 events.append("legacy")
-                return (GrokWebBillingSnapshot(usedPercent: 99, resetsAt: nil), "legacy", false)
+                return GrokWebBillingResult(
+                    snapshot: GrokWebBillingSnapshot(usedPercent: 99, resetsAt: nil),
+                    sourceLabel: "legacy",
+                    authContext: .cookie("sso=legacy"))
             })
 
         #expect(events.values == ["proxy"])
         #expect(result.snapshot.usedPercent == 12.5)
         #expect(result.sourceLabel == "grok-cli-proxy")
-        #expect(result.authenticatedByAuthFile)
+        #expect(result.authContext.credentials?.accessToken == Self.credentials.accessToken)
     }
 
     @Test
@@ -320,18 +405,18 @@ struct GrokCreditsProxyFetcherTests {
             },
             legacyBilling: {
                 events.append("legacy")
-                return (
-                    GrokWebBillingSnapshot(
+                return GrokWebBillingResult(
+                    snapshot: GrokWebBillingSnapshot(
                         usedPercent: 33,
                         resetsAt: Date(timeIntervalSince1970: 1_800_000_003)),
-                    "Chrome",
-                    false)
+                    sourceLabel: "Chrome",
+                    authContext: .cookie("sso=legacy"))
             })
 
         #expect(events.values == ["proxy", "legacy"])
         #expect(result.snapshot.usedPercent == 33)
         #expect(result.sourceLabel == "Chrome")
-        #expect(!result.authenticatedByAuthFile)
+        #expect(result.authContext.cookieHeader == "sso=legacy")
     }
 
     @Test
@@ -345,13 +430,16 @@ struct GrokCreditsProxyFetcherTests {
             },
             legacyBilling: {
                 events.append("legacy")
-                return (GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil), "Chrome", false)
+                return GrokWebBillingResult(
+                    snapshot: GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil),
+                    sourceLabel: "Chrome",
+                    authContext: .cookie("sso=legacy"))
             })
 
         #expect(events.values == ["proxy", "legacy"])
         #expect(result.snapshot.usedPercent == 42)
         #expect(result.sourceLabel == "Chrome")
-        #expect(!result.authenticatedByAuthFile)
+        #expect(result.authContext.cookieHeader == "sso=legacy")
     }
 
     @Test
@@ -367,7 +455,10 @@ struct GrokCreditsProxyFetcherTests {
                 },
                 legacyBilling: {
                     events.append("legacy")
-                    return (GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil), "Chrome", false)
+                    return GrokWebBillingResult(
+                        snapshot: GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil),
+                        sourceLabel: "Chrome",
+                        authContext: .cookie("sso=legacy"))
                 })
         } throws: { error in
             error is CancellationError
@@ -382,13 +473,228 @@ struct GrokCreditsProxyFetcherTests {
                 },
                 legacyBilling: {
                     events.append("legacy")
-                    return (GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil), "Chrome", false)
+                    return GrokWebBillingResult(
+                        snapshot: GrokWebBillingSnapshot(usedPercent: 42, resetsAt: nil),
+                        sourceLabel: "Chrome",
+                        authContext: .cookie("sso=legacy"))
                 })
         } throws: { error in
             (error as? URLError)?.code == .cancelled
         }
 
         #expect(events.values == ["proxy", "proxy"])
+    }
+
+    @Test
+    func `period-only credits ask grok dot com for the real percent`() async throws {
+        let events = EventRecorder()
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: reset,
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                events.append("grpc")
+                return GrokWebBillingSnapshot(usedPercent: 20, resetsAt: nil)
+            })
+
+        #expect(events.values == ["grpc"])
+        #expect(result.snapshot.usedPercent == 20)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.snapshot.subscriptionTier == "SuperGrok Heavy")
+        #expect(result.sourceLabel == "grok-web")
+        #expect(result.authContext.credentials?.accessToken == Self.credentials.accessToken)
+    }
+
+    @Test
+    func `recovered usage preserves the authoritative credits period reset`() async throws {
+        let proxyReset = Date(timeIntervalSince1970: 1_800_000_003)
+        let grpcReset = Date(timeIntervalSince1970: 1_800_604_803)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: proxyReset,
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                GrokWebBillingSnapshot(usedPercent: 20, resetsAt: grpcReset)
+            })
+
+        #expect(result.snapshot.usedPercent == 20)
+        #expect(result.snapshot.resetsAt == proxyReset)
+        #expect(result.snapshot.subscriptionTier == "SuperGrok Heavy")
+    }
+
+    @Test
+    func `a known credits percent is never second-guessed by grok dot com`() async throws {
+        let events = EventRecorder()
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(usedPercent: 0, resetsAt: nil),
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                events.append("grpc")
+                return GrokWebBillingSnapshot(usedPercent: 77, resetsAt: nil)
+            })
+
+        #expect(events.values.isEmpty)
+        #expect(result.snapshot.usedPercent == 0)
+        #expect(result.sourceLabel == "grok-cli-proxy")
+    }
+
+    @Test
+    func `usage stays unknown when grok dot com also publishes no percent`() async throws {
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: reset,
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            grpcBilling: { _ in GrokWebBillingSnapshot(usedPercent: nil, resetsAt: nil) })
+
+        #expect(result.snapshot.usedPercent == nil)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.snapshot.subscriptionTier == "SuperGrok Heavy")
+        #expect(result.sourceLabel == "grok-cli-proxy")
+    }
+
+    @Test
+    func `a failing grok dot com retry keeps the period-only credits answer`() async throws {
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(usedPercent: nil, resetsAt: reset),
+            credentials: Self.credentials,
+            grpcBilling: { _ in throw GrokWebBillingError.rpcFailed(16, "No credentials presented") })
+
+        #expect(result.snapshot.usedPercent == nil)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.sourceLabel == "grok-cli-proxy")
+    }
+
+    @Test
+    func `a cancelled grok dot com retry does not report unknown usage`() async throws {
+        await #expect {
+            _ = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+                GrokWebBillingSnapshot(usedPercent: nil, resetsAt: Date(timeIntervalSince1970: 1_800_000_003)),
+                credentials: Self.credentials,
+                grpcBilling: { _ in throw CancellationError() })
+        } throws: { error in
+            error is CancellationError
+        }
+
+        await #expect {
+            _ = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+                GrokWebBillingSnapshot(usedPercent: nil, resetsAt: Date(timeIntervalSince1970: 1_800_000_003)),
+                credentials: Self.credentials,
+                grpcBilling: { _ in throw URLError(.cancelled) })
+        } throws: { error in
+            (error as? URLError)?.code == .cancelled
+        }
+    }
+
+    @Test
+    func `an unclassified grok dot com zero leaves usage unknown`() async throws {
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: reset,
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                GrokWebBillingSnapshot(
+                    usedPercent: 0,
+                    resetsAt: reset,
+                    usedPercentIsWirePublished: false)
+            })
+
+        #expect(result.snapshot.usedPercent == nil)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.snapshot.subscriptionTier == "SuperGrok Heavy")
+        #expect(result.sourceLabel == "grok-cli-proxy")
+    }
+
+    @Test
+    func `an inferred grok dot com percent above zero is still refused`() async throws {
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: reset,
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            grpcBilling: { _ in
+                // No parser produces this today. Only the no-usage-yet zero carries frame
+                // evidence, so any other inferred reading stays unknown rather than published.
+                GrokWebBillingSnapshot(
+                    usedPercent: 20,
+                    resetsAt: nil,
+                    usedPercentIsWirePublished: false)
+            })
+
+        #expect(result.snapshot.usedPercent == nil)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.sourceLabel == "grok-cli-proxy")
+    }
+
+    @Test
+    func `a published grok dot com zero still replaces unknown usage`() async throws {
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(usedPercent: nil, resetsAt: nil),
+            credentials: Self.credentials,
+            grpcBilling: { _ in GrokWebBillingSnapshot(usedPercent: 0, resetsAt: nil) })
+
+        #expect(result.snapshot.usedPercent == 0)
+        #expect(result.sourceLabel == "grok-web")
+    }
+
+    @Test
+    func `a stalled grok dot com does not hold back the credits answer`() async throws {
+        let reset = Date(timeIntervalSince1970: 1_800_000_003)
+        let started = ContinuousClock.now
+        let result = try await GrokOAuthFetchStrategy.resolvingUnknownUsage(
+            GrokWebBillingSnapshot(usedPercent: nil, resetsAt: reset),
+            credentials: Self.credentials,
+            budget: .milliseconds(50),
+            grpcBilling: { _ in
+                try await Task.sleep(for: .seconds(30))
+                return GrokWebBillingSnapshot(usedPercent: 20, resetsAt: nil)
+            })
+        let elapsed = ContinuousClock.now - started
+
+        #expect(result.snapshot.usedPercent == nil)
+        #expect(result.snapshot.resetsAt == reset)
+        #expect(result.sourceLabel == "grok-cli-proxy")
+        #expect(elapsed < .seconds(5))
+    }
+
+    @Test
+    func `unknown credits usage leaves the menu card without a rate window`() {
+        let unknown = GrokUsageSnapshot(
+            billing: nil,
+            webBilling: GrokWebBillingSnapshot(
+                usedPercent: nil,
+                resetsAt: Date(timeIntervalSince1970: 1_800_000_003),
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            localSummary: nil,
+            cliVersion: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_799_000_000))
+        let known = GrokUsageSnapshot(
+            billing: nil,
+            webBilling: GrokWebBillingSnapshot(
+                usedPercent: 20,
+                resetsAt: Date(timeIntervalSince1970: 1_800_000_003),
+                subscriptionTier: "SuperGrok Heavy"),
+            credentials: Self.credentials,
+            localSummary: nil,
+            cliVersion: nil,
+            updatedAt: Date(timeIntervalSince1970: 1_799_000_000))
+
+        #expect(unknown.toUsageSnapshot().primary == nil)
+        #expect(known.toUsageSnapshot().primary?.usedPercent == 20)
     }
 
     private static let credentials = GrokCredentials(

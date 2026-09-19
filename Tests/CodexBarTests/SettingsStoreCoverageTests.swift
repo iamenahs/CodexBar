@@ -519,24 +519,8 @@ struct SettingsStoreCoverageTests {
     }
 
     @Test
-    func `ensure token loaders execute`() {
+    func `unconfigured credentials are immediately empty`() {
         let settings = Self.makeSettingsStore()
-
-        settings.ensureZaiAPITokenLoaded()
-        settings.ensureSyntheticAPITokenLoaded()
-        settings.ensureCodexCookieLoaded()
-        settings.ensureClaudeCookieLoaded()
-        settings.ensureCursorCookieLoaded()
-        settings.ensureOpenCodeCookieLoaded()
-        settings.ensureFactoryCookieLoaded()
-        settings.ensureMiniMaxCookieLoaded()
-        settings.ensureMiniMaxAPITokenLoaded()
-        settings.ensureKimiAuthTokenLoaded()
-        settings.ensureAugmentCookieLoaded()
-        settings.ensureAmpCookieLoaded()
-        settings.ensureOllamaCookieLoaded()
-        settings.ensureCopilotAPITokenLoaded()
-        settings.ensureTokenAccountsLoaded()
 
         #expect(settings.zaiAPIToken.isEmpty)
         #expect(settings[providerConfig: .synthetic, field: .apiKey].isEmpty)
@@ -895,6 +879,20 @@ struct SettingsStoreCoverageTests {
         fresh.preferredCurrencyCode = "GBP"
         let reloaded = Self.makeSettingsStore(userDefaults: defaults, configStore: configStore)
         #expect(reloaded.preferredCurrencyCode == "GBP")
+
+        reloaded.preferredCurrencyCode = "AED"
+        let reloadedAED = Self.makeSettingsStore(userDefaults: defaults, configStore: configStore)
+        #expect(reloadedAED.preferredCurrencyCode == "AED")
+    }
+
+    @Test
+    func `preferred currency picker matches every supported exchange currency`() {
+        let pickerCurrencies = PreferredCurrencyOption.allCases
+            .filter { $0 != .auto }
+            .map(\.rawValue)
+
+        #expect(pickerCurrencies == CurrencyExchange.supportedCurrencies)
+        #expect(PreferredCurrencyOption.aed.label == "AED (د.إ)")
     }
 
     private static func makeSettingsStore(

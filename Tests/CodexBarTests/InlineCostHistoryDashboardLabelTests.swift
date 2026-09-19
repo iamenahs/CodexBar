@@ -34,7 +34,6 @@ struct InlineCostHistoryDashboardLabelTests {
                 updatedAt: now),
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: tokenSnapshot,
             tokenError: nil,
@@ -50,7 +49,18 @@ struct InlineCostHistoryDashboardLabelTests {
 
         #expect(model.inlineUsageDashboard?.kpis.first?.title == "Today")
         #expect(model.inlineUsageDashboard?.kpis.first?.value == "$0.00")
-        #expect(model.inlineUsageDashboard?.points.first?.accessibilityValue == "2023-11-15: $0.25")
+        #expect(model.inlineUsageDashboard?.points.first?.accessibilityValue ==
+            "Nov 15, 2023: $0.25 · 275 tokens")
+        let hoverDetail = try #require(model.inlineUsageDashboard?.points.first?.hoverDetail)
+        #expect(hoverDetail == .init(
+            dateLabel: "Nov 15, 2023",
+            cost: 0.25,
+            tokenCount: 275,
+            currencyCode: "USD"))
+        let summary = CodexBarLocalizationOverride.$appLanguage.withValue("en") {
+            hoverDetail.summary
+        }
+        #expect(summary == "Nov 15, 2023: $0.25 · 275 tokens")
     }
 
     @Test
@@ -81,7 +91,6 @@ struct InlineCostHistoryDashboardLabelTests {
             snapshot: UsageSnapshot(primary: nil, secondary: nil, updatedAt: now),
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: tokenSnapshot,
             tokenError: nil,
@@ -107,7 +116,32 @@ struct InlineCostHistoryDashboardLabelTests {
         #expect(model.inlineUsageDashboard?.currencyCode == "USD")
         #expect(model.inlineUsageDashboard?.kpis.first?.value == expected)
         #expect(model.inlineUsageDashboard?.points.first?.value == expectedValue)
-        #expect(model.inlineUsageDashboard?.points.first?.accessibilityValue == "2023-11-15: \(expected)")
+        #expect(model.inlineUsageDashboard?.points.first?.accessibilityValue ==
+            "Nov 15, 2023: \(expected) · 100 tokens")
+        #expect(model.inlineUsageDashboard?.points.first?.hoverDetail == .init(
+            dateLabel: "Nov 15, 2023",
+            cost: expectedValue,
+            tokenCount: 100,
+            currencyCode: "USD"))
+    }
+
+    @Test
+    func `hover summary localizes the full sentence and preserves unknown values`() {
+        let detail = InlineUsageDashboardModel.HoverDetail(
+            dateLabel: "2023-11-15",
+            cost: nil,
+            tokenCount: nil,
+            currencyCode: "USD")
+
+        let english = CodexBarLocalizationOverride.$appLanguage.withValue("en") {
+            detail.summary
+        }
+        let simplifiedChinese = CodexBarLocalizationOverride.$appLanguage.withValue("zh-Hans") {
+            detail.summary
+        }
+
+        #expect(english == "2023-11-15: — · — tokens")
+        #expect(simplifiedChinese == "2023-11-15：— · — token")
     }
 
     @Test
@@ -151,7 +185,6 @@ struct InlineCostHistoryDashboardLabelTests {
                     updatedAt: now),
                 credits: nil,
                 creditsError: nil,
-                dashboard: nil,
                 dashboardError: nil,
                 tokenSnapshot: tokenSnapshot,
                 tokenError: nil,
@@ -213,7 +246,6 @@ struct InlineCostHistoryDashboardLabelTests {
                 updatedAt: now),
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: tokenSnapshot,
             tokenError: nil,
@@ -268,7 +300,6 @@ struct InlineCostHistoryDashboardLabelTests {
                 updatedAt: now),
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: tokenSnapshot,
             tokenError: nil,
@@ -304,7 +335,6 @@ struct InlineCostHistoryDashboardLabelTests {
                     snapshot: UsageSnapshot(primary: nil, secondary: nil, updatedAt: now),
                     credits: nil,
                     creditsError: nil,
-                    dashboard: nil,
                     dashboardError: nil,
                     tokenSnapshot: CostUsageTokenSnapshot(
                         sessionTokens: 275,
@@ -330,6 +360,79 @@ struct InlineCostHistoryDashboardLabelTests {
     }
 
     @Test
+    func `Codex inline cost history preserves zero value calendar days`() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let now = try #require(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 24,
+            hour: 12)))
+        let metadata = try #require(ProviderDefaults.metadata[.codex])
+        let tokenSnapshot = CostUsageTokenSnapshot(
+            sessionTokens: 400,
+            sessionCostUSD: 4,
+            last30DaysTokens: 700,
+            last30DaysCostUSD: 7,
+            historyDays: 4,
+            daily: [
+                CostUsageDailyReport.Entry(
+                    date: "2026-08-21",
+                    inputTokens: 250,
+                    outputTokens: 50,
+                    totalTokens: 300,
+                    costUSD: 3,
+                    modelsUsed: ["test-model"],
+                    modelBreakdowns: nil),
+                CostUsageDailyReport.Entry(
+                    date: "2026-08-24",
+                    inputTokens: 350,
+                    outputTokens: 50,
+                    totalTokens: 400,
+                    costUSD: 4,
+                    modelsUsed: ["test-model"],
+                    modelBreakdowns: nil),
+            ],
+            updatedAt: now)
+
+        let model = UsageMenuCardView.Model.make(.init(
+            provider: .codex,
+            metadata: metadata,
+            snapshot: UsageSnapshot(primary: nil, secondary: nil, updatedAt: now),
+            credits: nil,
+            creditsError: nil,
+            dashboardError: nil,
+            tokenSnapshot: tokenSnapshot,
+            tokenError: nil,
+            account: AccountInfo(email: nil, plan: nil),
+            isRefreshing: false,
+            lastError: nil,
+            usageBarsShowUsed: false,
+            resetTimeDisplayStyle: .countdown,
+            tokenCostUsageEnabled: true,
+            showOptionalCreditsAndExtraUsage: true,
+            hidePersonalInfo: false,
+            now: now))
+
+        let points = try #require(model.inlineUsageDashboard?.points)
+        #expect(points.map(\.id) == ["2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24"])
+        #expect(points.map(\.value) == [3, 0, 0, 4])
+        #expect(points.map(\.accessibilityValue) == [
+            "Aug 21, 2026: $3.00 · 300 tokens",
+            "Aug 22, 2026: $0.00 · 0 tokens",
+            "Aug 23, 2026: $0.00 · 0 tokens",
+            "Aug 24, 2026: $4.00 · 400 tokens",
+        ])
+        let hoverDetails: [InlineUsageDashboardModel.HoverDetail?] = [
+            .init(dateLabel: "Aug 21, 2026", cost: 3, tokenCount: 300, currencyCode: "USD"),
+            .init(dateLabel: "Aug 22, 2026", cost: 0, tokenCount: 0, currencyCode: "USD"),
+            .init(dateLabel: "Aug 23, 2026", cost: 0, tokenCount: 0, currencyCode: "USD"),
+            .init(dateLabel: "Aug 24, 2026", cost: 4, tokenCount: 400, currencyCode: "USD"),
+        ]
+        #expect(points.map(\.hoverDetail) == hoverDetails)
+    }
+
+    @Test
     func `cursor metered-only snapshot remains visible in inline dashboard`() throws {
         let now = Date(timeIntervalSince1970: 1_700_179_200)
         let metadata = try #require(ProviderDefaults.metadata[.cursor])
@@ -348,7 +451,6 @@ struct InlineCostHistoryDashboardLabelTests {
             snapshot: UsageSnapshot(primary: nil, secondary: nil, updatedAt: now),
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: tokenSnapshot,
             tokenError: nil,
@@ -388,7 +490,6 @@ struct InlineCostHistoryDashboardLabelTests {
             snapshot: snapshot,
             credits: nil,
             creditsError: nil,
-            dashboard: nil,
             dashboardError: nil,
             tokenSnapshot: nil,
             tokenError: nil,

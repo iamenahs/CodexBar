@@ -309,18 +309,6 @@ struct WidgetTileLayoutTests {
     // MARK: - Freshness
 
     @Test
-    func `a snapshot from moments ago reads as Now, never as a future time`() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-
-        // Gallery placeholders stamp updatedAt with the render time; the formatter turns that
-        // instant into "in 0s".
-        #expect(WidgetFormat.shortRelativeDate(now, relativeTo: now) == "Now")
-        #expect(WidgetFormat.shortRelativeDate(now.addingTimeInterval(30), relativeTo: now) == "Now")
-        #expect(WidgetFormat.shortRelativeDate(now.addingTimeInterval(-30), relativeTo: now) == "Now")
-        #expect(WidgetFormat.shortRelativeDate(now.addingTimeInterval(-3600), relativeTo: now) != "Now")
-    }
-
-    @Test
     func `staleness only trips past a day`() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
 

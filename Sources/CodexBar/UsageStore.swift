@@ -20,7 +20,7 @@ extension UsageStore {
         _ = self.claudeSwapAccountSnapshots
         _ = self.claudeSwapLastError
         _ = self.claudeSwapRevision
-        _ = self.tokenSnapshots
+        _ = self.tokenSnapshotPublications
         _ = self.tokenErrors
         _ = self.tokenRefreshInFlight
         _ = self.codexCostCatchUpActivity
@@ -97,14 +97,6 @@ extension UsageStore {
         return self.openAIDashboard
     }
 
-    private static func isRunningTestsProcess() -> Bool {
-        let environment = ProcessInfo.processInfo.environment
-        let testKeys = ["XCTestConfigurationFilePath", "XCTestSessionIdentifier", "SWIFT_TESTING_ENABLED"]
-        return testKeys.contains(where: { environment[$0] != nil }) || CommandLine.arguments.contains { argument in
-            argument.contains("xctest") || argument.contains("swift-testing")
-        }
-    }
-
     /// Returns the login method (plan type) for the specified provider, if available.
     private func loginMethod(for provider: UsageProvider) -> String? {
         self.snapshots[provider.instanceID]?.loginMethod(for: provider)
@@ -168,7 +160,7 @@ final class UsageStore {
     var snapshots: [ProviderInstanceID: UsageSnapshot] = [:]
     var errors: [ProviderInstanceID: String] = [:]
     var diagnostics: [ProviderInstanceID: String] = [:]
-    var geminiObservedConsumerTierDeprecation = false
+    var geminiMigrationObservation: GeminiMigrationObservation = .none
     var knownLimitsAvailabilityByProvider: [ProviderInstanceID: UsageLimitsAvailability] = [:]
     var lastSourceLabels: [ProviderInstanceID: String] = [:]
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
@@ -183,11 +175,14 @@ final class UsageStore {
     var claudeSwapRevision: UInt64 = 0
     @ObservationIgnored var claudeSwapRefreshTask: Task<Void, Never>?
     @ObservationIgnored var claudeSwapTransientState = ClaudeSwapTransientState()
-    var tokenSnapshots: [ProviderInstanceID: CostUsageTokenSnapshot] = [:]
     var tokenSnapshotPublications: [ProviderInstanceID: TokenSnapshotPublication] = [:]
     var tokenSnapshotPublicationRevisions: [ProviderInstanceID: UInt64] = [:]
     var spendDashboardTokenPublications: [ProviderInstanceID: TokenSnapshotPublication] = [:]
     var spendDashboardTokenPublicationRevisions: [ProviderInstanceID: UInt64] = [:]
+    @ObservationIgnored var spendDashboardTokenIncorporatedTriggers:
+        [ProviderInstanceID: SpendDashboardTokenRefreshTrigger] = [:]
+    @ObservationIgnored var spendDashboardTokenFailedTriggers:
+        [ProviderInstanceID: SpendDashboardTokenRefreshTrigger] = [:]
     var spendDashboardPublication = SpendDashboardPublication.empty
     @ObservationIgnored var sharedSpendDashboardControllerStorage: SpendDashboardController?
     @ObservationIgnored var sharedSpendDashboardObservationStarted = false
@@ -222,6 +217,7 @@ final class UsageStore {
     var providerStorageFootprints: [ProviderInstanceID: ProviderStorageFootprint] = [:]
     @ObservationIgnored var lastCreditsSnapshot: CreditsSnapshot?
     @ObservationIgnored var lastCreditsSnapshotAccountKey: String?
+    @ObservationIgnored var lastCreditsSnapshotOwnerGuard: CodexAccountScopedRefreshGuard?
     @ObservationIgnored var lastCreditsSource: CodexCreditsSource = .none
     @ObservationIgnored var creditsFailureStreak: Int = 0
     @ObservationIgnored var openAIDashboardAttachmentAuthorized: Bool = false {
@@ -251,6 +247,10 @@ final class UsageStore {
     @ObservationIgnored var openAIDashboardRefreshTask: Task<Void, Never>?
     @ObservationIgnored var openAIDashboardRefreshTaskKey: String?
     @ObservationIgnored var openAIDashboardRefreshTaskToken: UUID?
+    @ObservationIgnored var openAISubscriptionMetadataEnrichmentTask: Task<Void, Never>?
+    @ObservationIgnored var openAISubscriptionMetadataEnrichmentToken: UUID?
+    @ObservationIgnored var _test_openAISubscriptionMetadataLoaderOverride: (@MainActor (String?) async
+        -> OpenAISubscriptionFetchResult)?
     @ObservationIgnored var _test_openAIDashboardCookieImportOverride: (@MainActor (
         String?,
         Bool,
@@ -268,6 +268,10 @@ final class UsageStore {
     @ObservationIgnored var _test_providerRefreshOverride: (@MainActor (UsageProvider) async -> Void)?
     @ObservationIgnored var _test_providerFetchOutcomeOverride: (@MainActor (
         UsageProvider) async -> ProviderFetchOutcome)?
+    #if DEBUG
+    @ObservationIgnored var _test_codexAccountScopedRefreshDidComplete: (@MainActor () -> Void)?
+    @ObservationIgnored var _test_cursorCostCredentialFingerprintOverride: (() -> String?)?
+    #endif
     @ObservationIgnored var _test_tokenUsageRefreshOverride: (@MainActor (UsageProvider, Bool) async -> Void)?
     @ObservationIgnored var _test_tokenUsageSnapshotLoaderOverride: (@MainActor (
         UsageProvider,
@@ -290,6 +294,7 @@ final class UsageStore {
         Int) async throws -> CostUsageFetcher.CodexScanCatchUpStatus)?
     @ObservationIgnored var _test_codexCostCatchUpSleepOverride: (@MainActor (
         TimeInterval) async throws -> Void)?
+    @ObservationIgnored var _test_codexCostCatchUpActiveDuration: TimeInterval = 0
     @ObservationIgnored var _test_codexCostCatchUpResourceStateOverride: (@MainActor () -> (
         powerSource: CodexCostCatchUpPowerSource,
         lowPowerModeEnabled: Bool,
@@ -302,6 +307,7 @@ final class UsageStore {
         Int) async throws -> CostUsageFetcher.CodexScanCatchUpStatus)?
     @ObservationIgnored var _test_spendDashboardCodexCostCatchUpSleepOverride: (@MainActor (
         TimeInterval) async throws -> Void)?
+    @ObservationIgnored var _test_spendDashboardCodexCostCatchUpActiveDuration: TimeInterval = 0
     @ObservationIgnored var _test_spendDashboardCodexCostCatchUpResourceStateOverride: (@MainActor () -> (
         powerSource: CodexCostCatchUpPowerSource,
         lowPowerModeEnabled: Bool,
@@ -315,6 +321,7 @@ final class UsageStore {
     @ObservationIgnored var widgetSnapshotPersistTask: Task<Void, Never>?
     @ObservationIgnored var lastQueuedWidgetSnapshot: WidgetSnapshot?
     @ObservationIgnored let widgetSnapshotURL: URL?
+    @ObservationIgnored let widgetTimelineReloader: @MainActor () -> Void
     @ObservationIgnored var widgetUsagePreservationBlockedProviders: Set<ProviderInstanceID> = []
 
     @ObservationIgnored let codexFetcher: UsageFetcher
@@ -324,12 +331,12 @@ final class UsageStore {
     @ObservationIgnored private let registry: ProviderRegistry
     @ObservationIgnored let settings: SettingsStore
     @ObservationIgnored let environmentBase: [String: String]
-    @ObservationIgnored let pluginApprovalStore = ProviderPluginApprovalStore()
+    @ObservationIgnored let pluginApprovalStore: ProviderPluginApprovalStore
     @ObservationIgnored let sessionQuotaNotifier: any SessionQuotaNotifying
     @ObservationIgnored let sessionQuotaLogger = CodexBarLog.logger(LogCategories.sessionQuota)
     // Provider-specific by design: OpenAI web and Augment runtime diagnostics have dedicated app-owned log streams.
     @ObservationIgnored let openAIWebLogger = CodexBarLog.logger(LogCategories.provider(.openai, scope: "web"))
-    @ObservationIgnored private let tokenCostLogger = CodexBarLog.logger(LogCategories.tokenCost)
+    @ObservationIgnored let tokenCostLogger = CodexBarLog.logger(LogCategories.tokenCost)
     @ObservationIgnored let augmentLogger = CodexBarLog.logger(LogCategories.provider(.augment))
     @ObservationIgnored let providerLogger = CodexBarLog.logger(LogCategories.providers)
     @ObservationIgnored let adaptiveRefreshLogger = CodexBarLog.logger(LogCategories.adaptiveRefresh)
@@ -430,7 +437,7 @@ final class UsageStore {
     @ObservationIgnored var lastTokenFetchScope: [ProviderInstanceID: String] = [:]
     @ObservationIgnored var lastSpendDashboardTokenFetchAt: [ProviderInstanceID: Date] = [:]
     @ObservationIgnored var lastSpendDashboardTokenFetchScope: [ProviderInstanceID: String] = [:]
-    @ObservationIgnored var spendDashboardTokenRefreshInFlight: Set<ProviderInstanceID> = []
+    var spendDashboardTokenRefreshInFlight: Set<ProviderInstanceID> = []
     @ObservationIgnored var planUtilizationHistory: [ProviderInstanceID: PlanUtilizationHistoryBuckets] = [:]
     @ObservationIgnored var sessionEquivalentBurnCache: [ProviderInstanceID: SessionEquivalentBurnCacheEntry] = [:]
     @ObservationIgnored var sessionEquivalentHistoryScanCount: Int = 0
@@ -485,7 +492,9 @@ final class UsageStore {
         sessionQuotaNotifier: any SessionQuotaNotifying = SessionQuotaNotifier(),
         startupBehavior: StartupBehavior = .automatic,
         environmentBase: [String: String] = ProcessInfo.processInfo.environment,
+        pluginApprovalStore: ProviderPluginApprovalStore = ProviderPluginApprovalStore(),
         widgetSnapshotURL: URL? = nil,
+        widgetTimelineReloader: @escaping @MainActor () -> Void = UsageStore.reloadWidgetTimelines,
         planUtilizationHistoryLoadGateForTesting: PlanUtilizationHistoryLoadGate? = nil)
     {
         self.codexFetcher = fetcher
@@ -495,9 +504,11 @@ final class UsageStore {
         self.settings = settings
         self.registry = registry
         self.environmentBase = environmentBase
+        self.pluginApprovalStore = pluginApprovalStore
         self.widgetSnapshotURL = widgetSnapshotURL
+        self.widgetTimelineReloader = widgetTimelineReloader
         self.historicalUsageHistoryStore = historicalUsageHistoryStore
-        self.startupBehavior = startupBehavior.resolved(isRunningTests: Self.isRunningTestsProcess())
+        self.startupBehavior = startupBehavior.resolved(isRunningTests: TestProcessSafety.isRunning)
         let planHistoryStore = Self.resolvedPlanHistoryStore(planUtilizationHistoryStore, startup: self.startupBehavior)
         self.planUtilizationHistoryStore = planHistoryStore
         self.sessionQuotaNotifier = sessionQuotaNotifier
@@ -957,6 +968,7 @@ final class UsageStore {
         self.creditsRefreshTask?.cancel()
         self.openAIDashboardBackgroundRefreshTask?.cancel()
         self.openAIDashboardRefreshTask?.cancel()
+        self.openAISubscriptionMetadataEnrichmentTask?.cancel()
         self.memoryPressureReliefTask?.cancel()
         self.startupConnectivityRetryTask?.cancel()
         self.storageRefreshTask?.cancel()
@@ -991,22 +1003,6 @@ final class UsageStore {
 }
 
 extension UsageStore {
-    func debugDumpClaude() async {
-        // Provider-specific by design: Claude's debug command owns a raw CLI/web probe artifact and error lane.
-        let fetcher = ClaudeUsageFetcher(
-            browserDetection: self.browserDetection,
-            keepCLISessionsAlive: self.settings.debugKeepCLISessionsAlive)
-        let output = await fetcher.debugRawProbe(model: "sonnet")
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("codexbar-claude-probe.txt")
-        try? output.write(to: url, atomically: true, encoding: .utf8)
-        await MainActor.run {
-            let snippet = String(output.prefix(180)).replacingOccurrences(of: "\n", with: " ")
-            self.knownLimitsAvailabilityByProvider.removeValue(forKey: .claude)
-            self.errors[.claude] = "[Claude] \(snippet) (saved: \(url.path))"
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     func dumpLog(toFileFor provider: UsageProvider) async -> URL? {
         let text = await self.debugLog(for: provider)
         let filename = "codexbar-\(provider.rawValue)-probe.txt"
@@ -1022,10 +1018,6 @@ extension UsageStore {
             }
             return nil
         }
-    }
-
-    func debugAugmentDump() async -> String {
-        await AugmentStatusProbe.latestDumps()
     }
 
     func debugLog(for provider: UsageProvider) async -> String {
@@ -1491,8 +1483,8 @@ extension UsageStore {
         }
         let costScope = self.tokenCostScope(for: provider)
         let costScopeSignature = self.tokenSnapshotScopeSignature(for: provider)
-        let publicationRevision = self.providerPublicationRevision(for: provider)
-        let providerConfigRevision = self.settings.providerConfigRevision(for: provider)
+        let publicationScope = self.tokenRefreshPublicationScope(
+            for: provider, historyDays: historyDays, costScopeSignature: costScopeSignature)
         if !force, self.tokenRefreshCanReuseCurrentSnapshot(
             provider: provider,
             now: now,
@@ -1534,25 +1526,24 @@ extension UsageStore {
                 historyDays: historyDays,
                 initialSignature: costScopeSignature,
                 snapshot: snapshot)
-            guard self.tokenRefreshPublicationIsCurrent(
+            let publicationDisposition = self.tokenRefreshPublicationDisposition(
                 provider: provider,
-                publicationRevision: publicationRevision,
-                providerConfigRevision: providerConfigRevision,
-                historyDays: historyDays,
-                costScopeSignature: costScopeSignature,
+                scope: publicationScope,
                 fetchedCredentialScopeFingerprint: snapshot.credentialScopeFingerprint)
-            else {
+            guard publicationDisposition == .current else {
                 self.clearTokenFetchMetadataIfMatching(
                     provider: provider,
                     attemptedAt: now,
                     costScopeSignature: costScopeSignature)
-                self.requestTokenRefreshAfterStaleCompletion(for: provider)
+                if publicationDisposition == .scopeChanged {
+                    self.requestTokenRefreshAfterStaleCompletion(for: provider)
+                }
                 return
             }
             self.lastTokenFetchScope[provider.instanceID] = completedCostScopeSignature
             self.startCodexCostCatchUpIfNeeded(afterRefreshing: provider)
 
-            guard !snapshot.daily.isEmpty || snapshot.meteredCostUSD != nil else {
+            if try self.regularTokenSnapshotIsConfirmedEmpty(snapshot, for: provider) {
                 self.publishConfirmedEmptyTokenSnapshot(for: provider)
                 self.tokenErrors[provider.instanceID] = Self.tokenCostNoDataMessage(for: provider)
                 self.tokenFailureGates[provider.instanceID]?.recordSuccess()
@@ -1568,12 +1559,9 @@ extension UsageStore {
             self.tokenFailureGates[provider.instanceID]?.recordSuccess()
             self.persistWidgetSnapshot(reason: "token-usage")
         } catch {
-            guard self.tokenRefreshPublicationIsCurrent(
+            guard self.tokenRefreshPublicationDisposition(
                 provider: provider,
-                publicationRevision: publicationRevision,
-                providerConfigRevision: providerConfigRevision,
-                historyDays: historyDays,
-                costScopeSignature: costScopeSignature)
+                scope: publicationScope) == .current
             else {
                 self.clearTokenFetchMetadataIfMatching(
                     provider: provider,
@@ -1600,7 +1588,7 @@ extension UsageStore {
                     attemptedAt: now,
                     costScopeSignature: costScopeSignature)
             }
-            let hadPriorData = self.tokenSnapshots[provider.instanceID] != nil
+            let hadPriorData = self.tokenSnapshotPublications[provider.instanceID]?.snapshot != nil
             let shouldSurface = self.tokenFailureGates[provider.instanceID]?
                 .shouldSurfaceError(onFailureWithPriorData: hadPriorData) ?? true
             if shouldSurface {
@@ -1626,25 +1614,6 @@ extension UsageStore {
         self.lastTokenFetchScope.removeValue(forKey: provider.instanceID)
         self.lastSpendDashboardTokenFetchAt.removeValue(forKey: provider.instanceID)
         self.lastSpendDashboardTokenFetchScope.removeValue(forKey: provider.instanceID)
-    }
-
-    private func logTokenUsageSuccess(
-        provider: UsageProvider,
-        snapshot: CostUsageTokenSnapshot,
-        historyDays: Int,
-        startedAt: Date)
-    {
-        let durationText = String(format: "%.2f", Date().timeIntervalSince(startedAt))
-        let sessionCost = snapshot.sessionCostUSD
-            .map { UsageFormatter.currencyString($0, currencyCode: snapshot.currencyCode) } ?? "—"
-        let monthCost = snapshot.last30DaysCostUSD
-            .map { UsageFormatter.currencyString($0, currencyCode: snapshot.currencyCode) } ?? "—"
-        let message =
-            "cost usage success provider=\(provider.rawValue) " +
-            "duration=\(durationText)s " +
-            "today=\(sessionCost) " +
-            "historyDays=\(historyDays) windowCost=\(monthCost)"
-        self.tokenCostLogger.info(message)
     }
 
     private func clearTokenFetchMetadataIfMatching(

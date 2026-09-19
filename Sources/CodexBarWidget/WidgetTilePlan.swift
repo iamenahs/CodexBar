@@ -10,6 +10,7 @@ struct WidgetTileLane: Identifiable, Equatable {
     let remainingPercent: Double?
     var resetsAt: Date?
     var resetDescription: String?
+    var isHeadlineCandidate = true
 }
 
 /// How a tile splits its quota lanes: one headline lane plus the rest.
@@ -39,19 +40,21 @@ struct WidgetTilePlan: Equatable {
         maxSecondaryLanes: Int,
         reservesOverflowRow: Bool = false) -> WidgetTilePlan
     {
-        guard let hero = self.bindingLane(in: lanes) else { return .empty }
+        guard !lanes.isEmpty else { return .empty }
+        let hero = self.bindingLane(in: lanes)
         let candidates = displayCandidates ?? lanes
-        let remainder = candidates.filter { $0.id != hero.id }
+        let remainder = candidates.filter { $0.id != hero?.id }
+        let heroCount = hero == nil ? 0 : 1
         // Honour the provider's intended row count: the headline occupies one of those rows.
-        var capacity = min(max(0, maxSecondaryLanes), max(0, candidates.count - 1))
+        var capacity = min(max(0, maxSecondaryLanes), max(0, candidates.count - heroCount))
         // Give up a lane slot only when the "+N more" line would actually push the tile past its
         // budget. Whether that line appears is decided against every lane the provider reports,
         // not the curated subset: curation drops lanes that never reach `remainder`, so a curated
         // remainder that fits its budget exactly can still overflow.
         let listed = min(remainder.count, capacity)
-        let overflows = (lanes.count - 1) - listed > 0
+        let overflows = (lanes.count - heroCount) - listed > 0
         if reservesOverflowRow, listed + (overflows ? 1 : 0) > maxSecondaryLanes {
-            capacity = max(1, capacity - 1)
+            capacity = max(0, capacity - 1)
         }
         let shown = Array(remainder.prefix(capacity))
         // Counted against every lane the provider reports, not just the curated subset, so a lane
@@ -59,14 +62,15 @@ struct WidgetTilePlan: Equatable {
         return WidgetTilePlan(
             hero: hero,
             lanes: shown,
-            overflowCount: max(0, lanes.count - 1 - shown.count))
+            overflowCount: max(0, lanes.count - heroCount - shown.count))
     }
 
     /// Lowest remaining share wins; ties keep the provider's own ordering. Lanes without a
     /// percentage can only become the headline when nothing else can.
     private static func bindingLane(in lanes: [WidgetTileLane]) -> WidgetTileLane? {
-        let measured = lanes.filter { $0.remainingPercent != nil }
-        guard !measured.isEmpty else { return lanes.first }
+        let eligible = lanes.filter(\.isHeadlineCandidate)
+        let measured = eligible.filter { $0.remainingPercent != nil }
+        guard !measured.isEmpty else { return eligible.first }
         return measured.min { lhs, rhs in
             (lhs.remainingPercent ?? 0) < (rhs.remainingPercent ?? 0)
         }
@@ -86,12 +90,33 @@ extension WidgetTileLane {
     /// Every quota lane a tile can draw for this entry: the provider's usage rows plus the
     /// separately-tracked code review lane.
     static func lanes(for entry: WidgetSnapshot.ProviderEntry, limit: Int? = nil) -> [WidgetTileLane] {
-        var lanes = WidgetUsageRow.rows(for: entry, limit: limit).map(WidgetTileLane.init(row:))
+        var lanes = WidgetUsageRow.rows(for: entry, limit: limit, applyBindingCap: false)
+            .map(WidgetTileLane.init(row:))
+        if let provider = entry.provider.firstPartyProvider {
+            let binding = ProviderDescriptorRegistry.descriptor(for: provider).presentation.primaryBindingQuotaLanes
+            if !binding.isEmpty {
+                let slots = Set(binding.map { lane in
+                    switch lane {
+                    case .primary: "primary"
+                    case .secondary: "secondary"
+                    case .tertiary: "tertiary"
+                    }
+                }).union(["primary"])
+                for index in lanes.indices {
+                    lanes[index].isHeadlineCandidate = slots.contains(lanes[index].id)
+                }
+                // Provider-specific by design: Claude can replace its quota slots with the extra-usage balance.
+                if provider == .claude, lanes.count == 1, lanes[0].id == "extraUsage" {
+                    lanes[0].isHeadlineCandidate = true
+                }
+            }
+        }
         if let codeReview = entry.codeReviewRemainingPercent {
             lanes.append(WidgetTileLane(
                 id: "code-review",
                 title: "Code review",
-                remainingPercent: codeReview))
+                remainingPercent: codeReview,
+                isHeadlineCandidate: false))
         }
         return lanes
     }
@@ -100,6 +125,20 @@ extension WidgetTileLane {
 // MARK: - Lane copy
 
 enum WidgetLaneCopy {
+    enum Reset: Equatable {
+        case date(Date)
+        case text(String)
+    }
+
+    static func reset(
+        resetsAt: Date?,
+        resetDescription: String?,
+        now: Date = Date()) -> Reset?
+    {
+        if let resetsAt { return resetsAt > now ? .date(resetsAt) : nil }
+        return self.resetText(resetsAt: nil, resetDescription: resetDescription, now: now).map(Reset.text)
+    }
+
     /// "Weekly left" / "Weekly used" — the bare percentages the tiles used to show never said
     /// which of the two the user was looking at, and the preference silently flips it.
     static func caption(title: String, showUsed: Bool) -> String {

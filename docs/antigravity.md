@@ -18,7 +18,23 @@ signal and never enables or falls back to Antigravity automatically.
 To use the `agy` CLI source without keeping the desktop app open, install the CLI first
 (`brew install --cask antigravity-cli`; use `ANTIGRAVITY_CLI_PATH` when it is not on PATH), then
 run `agy` once and sign in. CodexBar keeps the signed-in `agy` local HTTPS server alive briefly
-after each refresh and stops it when idle.
+after each refresh and stops it when idle, or reuses a signed-in `agy` you already have running
+without taking ownership of that process.
+
+`agy` 1.2.2 and later reject tokenless local requests with `401 missing CSRF token` on both ports and do not
+expose the generated token (1.1.28, 1.2.0, and 1.2.1 answer the same request with `200`). When the selected
+executable reports 1.2.2 or later, CodexBar still spends its bounded warm-reuse check but does not spawn a
+managed session or wait for its readiness deadline. Unknown versions keep the managed spawn.
+
+For `agy` 1.2.2 and later, a failed legacy HTTPS fetch can fall back to
+`agy -p /usage --output-format json`. CodexBar checks that the same executable reports version 1.1.11
+or later before using print mode; [Google introduced non-interactive usage reports in 1.1.11](https://antigravity.google/changelog).
+It requires a successful `usage` command report with known,
+enabled quota buckets, bounds the command to 90 seconds and its output to 1 MiB, and terminates the command
+on cancellation. It runs in a private empty directory and does not send a model prompt or parse TUI output.
+The report contains no account or plan identity: explicit CLI mode remains authoritative, while Auto uses
+this fallback only without a selected token account or explicitly injected OAuth credentials. Successful
+HTTPS results retain their verified identity. Failed command diagnostics do not include raw stderr.
 
 Antigravity supports four usage data sources:
 
@@ -54,10 +70,14 @@ when CodexBar has a selected/injected Google account or an existing shared crede
 `fetchAvailableModels` payload is only accepted after `retrieveUserQuota` echoes bucket fractions; this can be an
 availability-style fallback rather than the full Antigravity quota summary.
 When OAuth identifies the account but quota endpoints deny access, CodexBar shows `Limits not available` instead of an
-empty quota card.
+empty quota card. Auto also skips `agy` reports without account identity when a Google account is selected or injected,
+because it cannot verify that those quotas belong to that account. Settings explains this beside **Usage source**.
+To try the local app or `agy` account instead, select **Local API / agy CLI** (CLI: `--source cli`).
+That source may use a different signed-in account from the Google account selected in CodexBar; it does not verify a match.
 
 ## OAuth account switching
 
+- OAuth refresh form-encodes credential values, preserving literal plus signs, separators, and percent escapes.
 - Login still uses Antigravity's Google OAuth client, discovered from `Antigravity.app` or overridden with `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`.
 - A successful login writes the latest shared credentials to `~/.codexbar/antigravity/oauth_creds.json` and upserts a token-account entry for the Google account.
 - Each token-account entry stores serialized `AntigravityOAuthCredentials` and is injected into remote fetches through `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`.
@@ -116,7 +136,14 @@ When the Antigravity 2.0 app is running:
      - `--extension_server_csrf_token <token>` (preferred HTTP fallback token when present).
 
 2. **Port discovery**
-   - Command: `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>`.
+   - macOS uses kernel process-socket enumeration.
+   - Linux tries `lsof -nP -iTCP -sTCP:LISTEN -a -p <pid>`, then process-scoped `/proc` discovery if
+     `lsof` is missing, fails to launch or exits unsuccessfully, or reports no listeners. Namespace warnings from
+     `lsof` therefore do not prevent discovery when `/proc` remains readable. Cancellation and hard subprocess limits
+     still propagate. If neither source finds a listener, CLI readiness polling continues within its existing deadline
+     and retains the last discovery diagnostic if startup never succeeds. An endpoint readiness failure takes
+     precedence once a listener has been reached.
+   - `/proc/<pid>/fd` socket inodes are matched only against the same process's `net/tcp` and `net/tcp6` tables.
    - All listening ports are probed.
 
 3. **Connect port probe (HTTPS)**
@@ -148,7 +175,7 @@ When source mode is `auto` or `cli` and the desktop local probe fails, CodexBar 
 
 CodexBar launches `agy` in a PTY because the CLI exposes its quota server only while the interactive process is alive.
 The implementation still does **not** scrape terminal output; it only keeps the process alive, drains discarded PTY
-rendering, discovers listening ports with `lsof`, and probes the local HTTPS server:
+rendering, uses the same platform-specific port discovery described above, and probes the local HTTPS server:
 
 - First: `POST https://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`
 - Fallback 1: `POST https://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/GetUserStatus`
@@ -158,11 +185,19 @@ The fallback can return quota without the account email or plan fields from `Get
 
 Differences from the desktop local probe:
 
-- The CLI HTTPS endpoint does **not** require `X-Codeium-Csrf-Token`.
-- Before a one-shot CLI invocation launches `agy`, CodexBar spends at most two seconds looking for an already-running,
-  same-user `agy` at the selected binary path and reuses its tokenless local HTTPS endpoint when it returns parseable
-  usage for the selected account. Long-lived app/server refreshes keep using CodexBar's managed session, and
-  CodexBar-owned pids are excluded from external reuse so probe/idle lifecycle accounting stays balanced.
+- Before `agy` 1.2.2, the CLI HTTPS endpoint does **not** require `X-Codeium-Csrf-Token`; 1.2.2 and later
+  require a token that CodexBar cannot obtain.
+- Before launching `agy`, both menu-bar refreshes and one-shot CLI invocations spend at most two seconds looking for
+  an already-running, same-user `agy` at the selected binary path and reuse its tokenless local HTTPS endpoint when it
+  returns parseable usage for the selected account. CodexBar-owned pids are excluded from external reuse so managed
+  probe/idle lifecycle accounting stays balanced; if no eligible external server answers, CodexBar uses its managed
+  session as before.
+- On macOS, external reuse matches the selected binary against the kernel executable path, not the spelling of
+  `argv[0]`; a bare `agy` command can match, but a conflicting executable cannot. Platforms without that identity
+  retain the absolute command-path check. User/account and managed-process exclusions are unchanged.
+- An unavailable or tokenless fallback preserves an earlier attempted-source failure, including CLI sign-in guidance, API errors, timeouts, and transport errors. A newly detected tokenless source can still replace an earlier not-running result. Successful fallbacks supply usage, and more specific later errors retain their normal precedence.
+- The same error-selection policy applies when the final source stops fallback, including when local data disappears between availability checking and fetching. Per-source diagnostics still describe each original failure.
+- On failure, `codexbar usage --provider antigravity` prints each auto strategy's outcome. Debug logs record one per-source line for both exhausted chains and terminal failures, using safe error categories. `codexbar diagnose --provider antigravity --format json --pretty` exports per-attempt strategy IDs, outcomes (`succeeded`/`skipped`/`failed`), and safe error categories. Legacy exports without the added fields remain readable.
 - Readiness is endpoint-based: CodexBar retries until one of the quota endpoints parses, because fresh `agy`
   processes can bind a port before the quota service is initialized.
 - App runtime uses a bounded warm session: `agy` is kept alive briefly after a refresh, then stopped on idle. CLI runtime
@@ -229,22 +264,134 @@ shared OAuth file can still be used as a fallback credential source.
 - Antigravity exposes many model rows, but current local payloads show them collapsing into two real usage pools:
   Gemini and Claude/GPT. Detailed usage should not list every raw Gemini tier unless a future source exposes a genuinely
   distinct unknown or consumed quota window.
+- Remote non-selectable variants are omitted only when their known remaining fraction and concrete reset timestamp exactly match the selected pool representative. Local rows, unknown usage, differing fractions, and missing or different reset timestamps remain distinct. Extra rows retain canonical model IDs; equal display titles do not establish a shared quota identity. When one canonical model has both known and reset-only observations, known usage wins.
 - Some Antigravity local/CLI model config entries include reset metadata but omit `remainingFraction`. Those windows stay
   in `extraRateWindows` for reset context and are marked with `usageKnown: false`; clients should not render their
   `usedPercent` as a real exhausted quota.
+- Menu-bar layout Session and Weekly tokens independently select the most constrained known quota-summary row for
+  each cadence across model families. They do not use the Gemini and Claude/GPT family representatives, which can
+  represent different cadences. Unknown or missing summary cadences remain unavailable; snapshots without summary
+  rows retain the standard cadence fallback. Automatic selection, its exhausted-quota option, and explicit family
+  metrics retain their existing selection policies.
 - Antigravity reports every model family the plan covers, so an account that only uses Gemini still receives a
   Claude/GPT pair pinned at 0%. Menu cards and widgets hide a family once every lane in it reports known zero usage.
   A family with unknown usage stays visible, and every family remains visible when all are untouched, for example
   right after a weekly reset. Provider details is the diagnostic surface and always lists every family, the same
-  principle it already applies to cost data. The filter is display-only: the snapshot, CLI output, and menu-bar
+  principle it already applies to cost data. The filter is display-only: the snapshot, raw CLI JSON, and menu-bar
   ranking still see every window, and menu-bar selection ranks by highest used, so an untouched family never wins.
 - The dashboard-v1 payload keeps every family for its script clients and marks the lanes of an untouched family with
   `idle` instead. The `codexbar serve` web UI skips those rows, so the web card matches the menu without repeating
   the family rule in JavaScript. See `docs/dashboard-api.md`.
+- CLI text and `cards` render quota-summary buckets once, using the same idle-family visibility rule. Missing or disabled quota stays unavailable, including in brief cards, while reset context remains visible. Raw JSON retains every bucket.
+
+## Local token history
+
+Local history reads only the existing recognized roots: `~/.gemini/antigravity-cli/conversations/*.db`,
+`~/.gemini/antigravity/*.db`, and `~/.gemini/antigravity/conversations/*.db`. `GEMINI_CLI_HOME` replaces
+`~/.gemini`. When SQLite discovery completes without any databases, the reader can use
+`~/.config/tokscale/antigravity-cache/sessions/*.jsonl`; `TOKSCALE_CONFIG_DIR` replaces `~/.config/tokscale`.
+Both overrides and `HOME` come from the same refresh environment. Declared roots and session files may be symlinks;
+discovery still visits only the immediate entries of the recognized directories. This is machine-local token history,
+not account attribution or dollar pricing. No language server, provider CLI, browser, credentials, or network is used.
+
+Use `codexbar cost --provider antigravity --format json` to read this same local history from the CLI.
+The cost endpoint and dashboard also include it when Antigravity is selected. Token counts do not imply known dollar
+costs, and these entry points do not expand the supported timestamp layouts described below.
+
+SQLite is authoritative when present. An unreadable root, malformed database, unsupported event layout, or exhausted
+budget never authorizes replacement by a smaller/stale JSONL cache. A database that describes its own tables and no
+`gen_metadata` table is not Antigravity history: the reader skips it, counts it, and leaves coverage intact.
+Antigravity 1.2.3 writes exactly such a file, `~/.gemini/antigravity/conversation_summaries.db`, into a declared root.
+Unrelated databases alone leave history unavailable; a recognized empty history database still establishes complete
+empty history alongside them. Undecodable schema names or types remain incomplete rather than proving a file foreign.
+A `gen_metadata` table with unknown columns is schema drift rather than a foreign file, and still leaves the report
+incomplete. Some SQLite builds, including the macOS system library, decline a read-only open of a WAL database whose
+`-wal` and `-shm` sidecars are absent, which is what a cleanly closed conversation leaves behind. When that happens
+and no `-wal` sidecar exists, the reader retries that one database with an `immutable=1` open of the main file; it
+never creates sidecars. The retry counts only when the file and its sidecar state are unchanged afterwards. A database
+with a `-wal` sidecar present stays unavailable, because a WAL connection may still hold it. Complete empty databases
+and complete histories outside the selected window establish empty history; absent sources and partial scans do not.
+Partial reports remain diagnostic only: the fetcher withholds their rows. Regular refresh applies its existing
+failure/retention policy, and neither regular refresh nor the dashboard publishes unavailable results as confirmed
+zero. Failed dashboard attempts do not acknowledge successful incorporation of a refresh trigger. Overflowed aggregate
+totals remain unknown rather than becoming saturated or wrapping.
+
+The schema evidence is [Tokscale's pinned SQLite parser](https://github.com/junhoyeo/tokscale/blob/62ca1eb1677556972ba963fdfa3a41ab23c1eb4b/crates/tokscale-core/src/sessions/antigravity_cli.rs),
+whose header records six databases and 140 turns. SQLite usage fields 1 + 2 are input, 5 is cache read,
+9 is text output, and 10 is thinking output: text and thinking are separate counts. Historical model IDs are retained;
+missing models stay unknown unless an unambiguous raw label maps to a model within the same session.
+Conflicting mappings remain unresolved. Every repeated known protobuf envelope is validated and merged.
+The supported database layout is an ordinary `gen_metadata` table with stored `idx` and `data` columns.
+Extra ordinary columns and `WITHOUT ROWID` tables are supported; views, virtual tables, and generated/hidden columns
+are rejected before querying payloads. Schema inspection and the payload scan share one read transaction.
+Inspection uses `sqlite_master` and `table_xinfo`; SQLite builds without that pragma cannot establish coverage.
+
+Supported SQLite event time is `chatModel.#9.#4` containing protobuf seconds/nanos. When it is absent, the reader can
+recover the standard seconds/nanos timestamp from `steps.metadata.#1`, joining the generation's root step UUID (`#4`)
+to `steps.metadata.#12`. A unique generation usage `bot_id` (`chatModel.#4.#7`) first selects the matching
+`steps.metadata.#9.#7` within that UUID, so auxiliary or reordered steps do not shift a turn's date. A row with no
+`steps.metadata.#12` (field 12 absent, or blank per the reader's whitespace-only-is-absent rule) supplies no UUID position:
+it is skipped rather than invalidating the scan, since it belongs to no UUID's occurrence list and cannot supply or
+shift positional evidence. While any such row is present, a single step timestamp no longer stands in for every reused
+generation occurrence of its UUID; a UUID used by only one generation is unaffected. A bot ID on an unidentified row still makes that bot ambiguous for exact and positional recovery, even if another row supplies the same timestamp. Conflicting, cross-UUID, or
+timestamp-less duplicate step IDs cannot supply exact or positional evidence. Embedded timestamps in a UUID needing
+recovery must agree with available generation-unique exact matches; unrelated UUIDs retain their embedded timestamps.
+Missing or malformed auxiliary IDs retain the guarded legacy positional fallback, as do repeated generation IDs:
+ordered step timestamps must agree with embedded generation timestamps, and ambiguous positions are never removed or
+compressed. Malformed auxiliary IDs do not discard otherwise valid embedded usage or relax token-counter and protobuf
+framing validation. Session creation, file modification, and refresh time are never substitutes.
+The opaque agy 1.1.18 timestamp layout remains unsupported: the pinned parser
+explicitly labels its newer interpretation an inference. See [the session-start misattribution report](https://github.com/junhoyeo/tokscale/issues/1184).
+
+SQLite session identity is the original database filename stem, with `gen_metadata.idx` identifying rows. Copies
+retaining that session name deduplicate across recognized roots; ID-less rows at different indices remain distinct.
+Response IDs deduplicate only within a session, after successful validation and aggregation. Conflicting copies mark
+coverage partial. Arbitrarily renamed copies cannot be identified by this schema and are not supported as copies;
+the reader never guesses identity from equal token payloads.
+
+The [separate JSONL producer](https://github.com/junhoyeo/tokscale/blob/62ca1eb1677556972ba963fdfa3a41ab23c1eb4b/crates/tokscale-cli/src/antigravity.rs)
+records `sessionId`, retry `outputTokens` as `output`, and `thinkingOutputTokens` as `reasoning`. These recorded buckets
+do not establish whether output already includes thinking. JSONL with nonzero reasoning therefore remains unsupported
+until that relationship is independently established; neither adding nor subtracting it is assumed. JSONL requires a session identity and a finite,
+exact integer usage timestamp. Numeric lexemes are checked before Foundation decoding can round them: counters must
+be exact nonnegative integers through `Int.max`, and timestamps must be positive integers through 253402300799999 ms.
+Whole decimal/exponent equivalents and signed zero are accepted without floating-point conversion; fractional,
+underflowing, overflowing, boolean, or quoted-number values are not. Top-level keys must be unique, including escaped
+equivalents. Session metadata can supply a model, never a missing usage timestamp. The producer
+prefers usage time but can fall back to session start, so its reported dates may be imprecise. The reader honors
+explicit usage timestamps, including equality with session start: equality does not distinguish a legitimate first
+generation from the producer's fallback. Identical session/line
+copies deduplicate, while contradictory copies remain partial.
+
+One cancellable job on `CostUsageScanExecutor` owns discovery, SQL, decoding, and fallback. Limits are 500 files,
+10,000 directory entries, 10,000 rows per file, 50,000 rows overall, 16 MiB per record, 64 MiB per file,
+128 MiB of attempted payload bytes overall, and a five-second cooperative scan deadline. Rejected rows consume the budget;
+exactly 500 complete databases are accepted. Discovery is incremental and JSONL is read in bounded chunks.
+Schema inspection accepts at most 128 catalogue entries and 64 columns per database (one additional row detects
+truncation), with a cumulative 64 KiB allowance for inspected schema text and the same cooperative deadline/cancellation.
+SQLite values are capped at 64 KiB during
+inspection (or the smaller payload limit plus record overhead). SQLite then uses one streaming payload SELECT over the
+validated ordinary table. A length-based conditional projection checks the remaining
+byte budget before SQLite selects each BLOB, and a SQLite length limit also bounds intermediate values. Rejected
+payload lengths still count as attempted work. Before copying, the selected BLOB's own byte count must match the declared
+length. There is no view or sorting step that can buffer payloads ahead of accounting;
+the reader buffers only validated typed events.
+
+Database access uses ordinary `SQLITE_OPEN_READONLY` and never an unsafe file copy. This does not mutate
+database records, but SQLite's normal WAL access may create sidecars and coordinate through SHM read marks.
+It is not a guarantee of literal SHM-byte preservation. The one exception is the `immutable=1` retry described
+above for a sidecar-less WAL database that the platform SQLite declines. That connection neither locks nor detects
+changes, so the reader records the file's size, modification time, file system number, and header before the
+retry and accepts the result only when they and the sidecar state are unchanged afterwards. A writer that appears
+and checkpoints during the retry leaves the database incomplete. Temporary fixture tests compare DB/WAL contents
+without writer activity, coordinate subsequent writer activity against one read snapshot, cover a writer that
+checkpoints during the immutable retry, and verify reader cleanup after cancellation. The fixtures are synthetic
+and source-linked, not private captures or proof of live installation/UI behavior.
 
 ## Constraints
 - Internal protocol; fields may change.
-- Requires `lsof` for local/CLI port detection.
+- Linux local/CLI port detection requires working `lsof` output or readable process-scoped `/proc` socket metadata;
+  macOS uses kernel process-socket enumeration.
 - Local HTTPS uses a self-signed cert; the probe allows insecure TLS only for loopback hosts.
 
 ## Key files

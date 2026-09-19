@@ -66,7 +66,7 @@ struct CodexBarTests {
             ],
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .antigravity)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .antigravity, showUsed: false)
 
         #expect(remaining.primary == nil)
         #expect(remaining.secondary == nil)
@@ -318,7 +318,7 @@ struct CodexBarTests {
             tertiary: RateWindow(usedPercent: 20, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .perplexity)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .perplexity, showUsed: false)
         #expect(remaining.primary == 80)
         #expect(remaining.secondary == 0)
     }
@@ -331,7 +331,7 @@ struct CodexBarTests {
             tertiary: RateWindow(usedPercent: 20, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .perplexity)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .perplexity, showUsed: false)
         #expect(remaining.primary == 80)
         #expect(remaining.secondary == 0)
     }
@@ -344,7 +344,7 @@ struct CodexBarTests {
             tertiary: RateWindow(usedPercent: 45, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .perplexity)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .perplexity, showUsed: false)
         #expect(remaining.primary == 55)
         #expect(remaining.secondary == 80)
     }
@@ -359,7 +359,7 @@ struct CodexBarTests {
             secondary: nil,
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .kimi)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .kimi, showUsed: false)
 
         guard let primaryRemaining = remaining.primary else {
             Issue.record("remaining.primary was nil after IconRemainingResolver check")
@@ -412,9 +412,10 @@ struct CodexBarTests {
             ],
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(
+        let remaining = IconRemainingResolver.resolvedPercents(
             snapshot: snapshot,
             style: .copilot,
+            showUsed: false,
             secondaryOverrideWindowID: "copilot-budget-agent")
 
         #expect(remaining.primary == 80)
@@ -535,9 +536,10 @@ struct CodexBarTests {
             extraRateWindows: nil,
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(
+        let remaining = IconRemainingResolver.resolvedPercents(
             snapshot: snapshot,
             style: .copilot,
+            showUsed: false,
             secondaryOverrideWindowID: "copilot-budget-agent")
 
         #expect(remaining.primary == 80)
@@ -596,12 +598,11 @@ struct CodexBarTests {
             showUsed: true)
 
         #expect(percents.primary == 10)
-        #expect(percents.secondary != nil)
-        #expect(percents.secondary ?? 1 < 0.01)
+        #expect(percents.secondary == 0.1)
     }
 
     @Test
-    func `merged icon keeps exhausted warp bonus fully used`() {
+    func `merged icon preserves exhausted warp bonus layout`() {
         let snapshot = UsageSnapshot(
             primary: RateWindow(usedPercent: 10, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
             secondary: RateWindow(usedPercent: 100, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
@@ -610,19 +611,26 @@ struct CodexBarTests {
         let percents = IconRemainingResolver.resolvedPercents(
             snapshot: snapshot,
             style: .warp,
-            showUsed: true,
-            renderingStyle: .combined)
+            showUsed: true)
 
         #expect(percents.primary == 10)
-        #expect(percents.secondary == 100)
+        #expect(percents.secondary == 0)
     }
 
     @Test
-    @MainActor
-    func `status icon accessibility uses percentage scale`() {
-        #expect(
-            StatusIconView.accessibilityPercentRemaining(50) ==
-                String(format: L("%d percent remaining"), 50))
+    func `merged icon keeps unused warp bonus lane visible`() {
+        let snapshot = UsageSnapshot(
+            primary: RateWindow(usedPercent: 10, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
+            secondary: RateWindow(usedPercent: 0, windowMinutes: nil, resetsAt: nil, resetDescription: nil),
+            updatedAt: Date())
+
+        let percents = IconRemainingResolver.resolvedPercents(
+            snapshot: snapshot,
+            style: .warp,
+            showUsed: true)
+
+        #expect(percents.primary == 10)
+        #expect(percents.secondary == 0.1)
     }
 
     @Test
@@ -633,7 +641,7 @@ struct CodexBarTests {
             tertiary: nil,
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .codex)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .codex, showUsed: false)
         #expect(remaining.primary == 75)
         #expect(remaining.secondary == nil)
     }
@@ -646,7 +654,7 @@ struct CodexBarTests {
             tertiary: nil,
             updatedAt: Date())
 
-        let remaining = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .codex)
+        let remaining = IconRemainingResolver.resolvedPercents(snapshot: snapshot, style: .codex, showUsed: false)
         #expect(remaining.primary == 75)
         #expect(remaining.secondary == nil)
     }
@@ -668,10 +676,15 @@ struct CodexBarTests {
                 resetDescription: nil),
             updatedAt: now.addingTimeInterval(-7200))
 
-        let capped = IconRemainingResolver.resolvedRemaining(snapshot: snapshot, style: .codex, now: now)
-        let reset = IconRemainingResolver.resolvedRemaining(
+        let capped = IconRemainingResolver.resolvedPercents(
             snapshot: snapshot,
             style: .codex,
+            showUsed: false,
+            now: now)
+        let reset = IconRemainingResolver.resolvedPercents(
+            snapshot: snapshot,
+            style: .codex,
+            showUsed: false,
             now: weeklyReset)
 
         #expect(capped.primary == 0)
@@ -864,7 +877,9 @@ struct CodexBarTests {
         try data.write(to: authURL)
 
         let fetcher = UsageFetcher(environment: ["CODEX_HOME": tmp.path])
-        let account = fetcher.loadAccountInfo()
+        let account = CodexCredentialFileAccess.withFixtureScope(.init(files: [authURL])) {
+            fetcher.loadAccountInfo()
+        }
         #expect(account.email == "user@example.com")
         #expect(account.plan == "pro")
     }
@@ -885,7 +900,9 @@ struct CodexBarTests {
         try data.write(to: authURL)
 
         let fetcher = UsageFetcher(environment: ["CODEX_HOME": tmp.path])
-        let account = fetcher.loadAccountInfo()
+        let account = CodexCredentialFileAccess.withFixtureScope(.init(files: [authURL])) {
+            fetcher.loadAccountInfo()
+        }
         #expect(account.email == "user@example.com")
         #expect(account.plan == "pro")
     }

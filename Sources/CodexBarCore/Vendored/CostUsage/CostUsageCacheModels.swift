@@ -14,6 +14,8 @@ struct CostUsageCache: Codable, Equatable, @unchecked Sendable {
     var codexPriorityTurnKeys: [String: String]?
     var codexPriorityTurnIDsByDay: [String: [String]]?
     var codexPriorityTurnsCursor: CostUsageScanner.CodexPriorityTurnsPersistedCursor?
+    /// Last validated report evidence; an empty map is distinct from an older cache without it.
+    var codexResolvedPriorityTurns: [String: CostUsageScanner.CodexPriorityTurnMetadata]?
     var codexScanCatchUpPending: Bool?
     var codexScanProcessedBytes: Int64?
     var codexScanTotalBytes: Int64?
@@ -138,6 +140,7 @@ struct CostUsageCodexPreviousReport: Codable, Equatable {
         var modelsUsed: [String]?
         var modelBreakdowns: [ModelBreakdown]?
         var unpricedRequestCount: Int?
+        var pricedRequestCount: Int?
         var unmeteredRequestCount: Int?
         var estimatedRequestCount: Int?
 
@@ -154,6 +157,7 @@ struct CostUsageCodexPreviousReport: Codable, Equatable {
             self.modelsUsed = entry.modelsUsed
             self.modelBreakdowns = entry.modelBreakdowns?.map(ModelBreakdown.init)
             self.unpricedRequestCount = entry.unpricedRequestCount
+            self.pricedRequestCount = entry.pricedRequestCount
             self.unmeteredRequestCount = entry.unmeteredRequestCount
             self.estimatedRequestCount = entry.estimatedRequestCount
         }
@@ -173,7 +177,8 @@ struct CostUsageCodexPreviousReport: Codable, Equatable {
                 modelBreakdowns: self.modelBreakdowns?.map(\.dailyReportValue),
                 unpricedRequestCount: self.unpricedRequestCount,
                 unmeteredRequestCount: self.unmeteredRequestCount,
-                estimatedRequestCount: self.estimatedRequestCount)
+                estimatedRequestCount: self.estimatedRequestCount,
+                pricedRequestCount: self.pricedRequestCount)
         }
     }
 
@@ -213,13 +218,18 @@ struct CostUsageCodexPreviousReport: Codable, Equatable {
     var timeZoneIdentifier: String?
     var roots: [String: Int64]?
 
-    init?(report: CostUsageDailyReport, cache: CostUsageCache) {
+    init?(
+        report: CostUsageDailyReport,
+        cache: CostUsageCache,
+        reportSinceKey: String,
+        reportUntilKey: String)
+    {
         guard !report.data.isEmpty else { return nil }
         self.data = report.data.map(Entry.init)
         self.summary = report.summary.map(Summary.init)
         self.updatedAtUnixMs = cache.lastScanUnixMs
-        self.scanSinceKey = cache.scanSinceKey
-        self.scanUntilKey = cache.scanUntilKey
+        self.scanSinceKey = reportSinceKey
+        self.scanUntilKey = reportUntilKey
         self.timeZoneIdentifier = cache.timeZoneIdentifier
         self.roots = cache.roots
     }
@@ -248,7 +258,15 @@ struct CostUsageCodexPreviousReport: Codable, Equatable {
     }
 }
 
+struct CostUsageCodexRetryBufferPresence: Codable, Equatable, Sendable {
+    var subagent = false
+    var unresolvedFork = false
+}
+
 struct CostUsageFileUsage: Codable, Equatable {
+    /// Increment for native parser corrections; older or absent revisions use bounded reparsing.
+    static let currentCodexParserRevision = 2
+
     var mtimeUnixMs: Int64
     var size: Int64
     var days: [String: [String: [Int]]]
@@ -278,6 +296,10 @@ struct CostUsageFileUsage: Codable, Equatable {
     var codexTurnIDs: [String]?
     var codexWorkspaceContentFingerprint: String?
     var codexRows: [CostUsageScanner.CodexUsageRow]?
+    var codexNextUsageRowIndex: Int?
+    var codexPendingPricing: [String: CostUsageScanner.CodexPricingEvidence]?
+    var codexPendingSourcePricing: [CostUsageScanner.CodexSourcePricingKey: CostUsageScanner.CodexPricingEvidence]?
+    var codexPendingSourcePricingAnchor: CostUsageCodexTokenIndexAnchor?
     var codexTokenSnapshots: [CostUsageCodexTokenSnapshot]?
     var codexTokenCheckpoints: [CostUsageCodexTokenCheckpoint]?
     var codexTokenTimestampsMonotonic: Bool?
@@ -289,10 +311,24 @@ struct CostUsageFileUsage: Codable, Equatable {
     var codexJSONLResumeState: CostUsageJsonl.ResumeState?
     var codexBufferedSubagentLines: [CostUsageScanner.CodexBufferedFastLine]?
     var codexBufferedUnresolvedForkLines: [CostUsageScanner.CodexBufferedFastLine]?
+    /// Only the store's private read-view adapter uses presence without loading replay bodies.
+    var codexReadRetryBufferPresence: CostUsageCodexRetryBufferPresence?
+    var codexParserRevision: Int? = CostUsageFileUsage.currentCodexParserRevision
+
+    var hasCurrentCodexParser: Bool {
+        self.codexParserRevision == Self.currentCodexParserRevision
+    }
+
+    var hasBufferedCodexSubagentLines: Bool {
+        self.codexReadRetryBufferPresence?.subagent ?? (self.codexBufferedSubagentLines?.isEmpty == false)
+    }
+
+    var hasBufferedCodexUnresolvedForkLines: Bool {
+        self.codexReadRetryBufferPresence?.unresolvedFork ?? (self.codexBufferedUnresolvedForkLines?.isEmpty == false)
+    }
 
     var hasBufferedCodexForkRetryLines: Bool {
-        self.codexBufferedSubagentLines?.isEmpty == false
-            || self.codexBufferedUnresolvedForkLines?.isEmpty == false
+        self.hasBufferedCodexSubagentLines || self.hasBufferedCodexUnresolvedForkLines
     }
 }
 

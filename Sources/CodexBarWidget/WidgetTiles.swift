@@ -10,7 +10,7 @@ enum WidgetTileSize {
 
     var heroNumberSize: CGFloat {
         switch self {
-        case .small: 30
+        case .small: 24
         case .medium: 34
         case .large: 42
         }
@@ -80,7 +80,7 @@ struct UsageTile<Header: View>: View {
         let hasChart = self.size.showsChart(
             laneCount: allLanes.count,
             hasHistory: !self.entry.dailyUsage.isEmpty)
-        let fallback = allLanes.isEmpty ? WidgetFallbackHero.make(for: self.entry) : nil
+        let fallback = allLanes.contains(where: \.isHeadlineCandidate) ? nil : WidgetFallbackHero.make(for: self.entry)
         let metrics = WidgetMetricRows.rows(
             for: self.entry,
             size: self.size,
@@ -94,44 +94,71 @@ struct UsageTile<Header: View>: View {
                 hasChart: hasChart),
             reservesOverflowRow: self.size != .large)
 
-        VStack(alignment: .leading, spacing: WidgetLayout.sectionSpacing) {
-            self.header()
-            // Medium splits into columns only when there are lanes to fill the right one. A
-            // single-lane provider in two columns leaves a void beside the headline; down one
-            // column it gets the full width for its bar instead.
-            if self.size == .medium, !plan.lanes.isEmpty {
-                HStack(alignment: .top, spacing: 14) {
-                    self.hero(plan: plan, fallback: fallback, color: color, spreads: !metrics.isEmpty)
-                        .frame(width: 104, alignment: .leading)
-                    VStack(alignment: .leading, spacing: WidgetLayout.laneSpacing) {
-                        self.lanes(plan: plan, color: color)
-                        if !metrics.isEmpty {
-                            Spacer(minLength: 2)
-                            self.metrics(metrics)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .frame(maxHeight: .infinity)
-            } else {
-                self.hero(plan: plan, fallback: fallback, color: color, spreads: false)
-                VStack(alignment: .leading, spacing: self.size.laneSpacing) {
-                    self.lanes(plan: plan, color: color)
-                }
-                self.metrics(metrics)
-                if hasChart {
-                    UsageHistoryChart(
-                        points: self.entry.dailyUsage,
+        if self.size == .small {
+            ViewThatFits(in: .vertical) {
+                ForEach([2, 1, 0], id: \.self) { capacity in
+                    self.smallContent(
+                        plan: WidgetTilePlan.make(
+                            lanes: allLanes,
+                            displayCandidates: displayLanes,
+                            maxSecondaryLanes: capacity,
+                            reservesOverflowRow: true),
+                        fallback: fallback,
                         color: color,
-                        currencyCode: self.entry.tokenUsage?.currencyCode)
-                        .frame(minHeight: 66, maxHeight: .infinity)
+                        metrics: metrics)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                self.smallContent(
+                    plan: WidgetTilePlan.make(
+                        lanes: allLanes,
+                        displayCandidates: displayLanes,
+                        maxSecondaryLanes: 0,
+                        reservesOverflowRow: true),
+                    fallback: fallback,
+                    color: color,
+                    metrics: [])
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            VStack(alignment: .leading, spacing: WidgetLayout.sectionSpacing) {
+                self.header()
+                // Medium splits into columns only when there are lanes to fill the right one. A
+                // single-lane provider in two columns leaves a void beside the headline; down one
+                // column it gets the full width for its bar instead.
+                if self.size == .medium, !plan.lanes.isEmpty {
+                    HStack(alignment: .top, spacing: 14) {
+                        self.hero(plan: plan, fallback: fallback, color: color, spreads: !metrics.isEmpty)
+                            .frame(width: 104, alignment: .leading)
+                        VStack(alignment: .leading, spacing: WidgetLayout.laneSpacing) {
+                            self.lanes(plan: plan, color: color)
+                            if !metrics.isEmpty {
+                                Spacer(minLength: 2)
+                                self.metrics(metrics)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    }
+                    .frame(maxHeight: .infinity)
                 } else {
-                    Spacer(minLength: 0)
+                    self.hero(plan: plan, fallback: fallback, color: color, spreads: false)
+                    VStack(alignment: .leading, spacing: self.size.laneSpacing) {
+                        self.lanes(plan: plan, color: color)
+                    }
+                    self.metrics(metrics)
+                    if hasChart {
+                        UsageHistoryChart(
+                            points: self.entry.dailyUsage,
+                            color: color,
+                            currencyCode: self.entry.tokenUsage?.currencyCode)
+                            .frame(minHeight: 66, maxHeight: .infinity)
+                    } else {
+                        Spacer(minLength: 0)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .padding(WidgetLayout.tilePadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// Providers cap how many lanes a compact tile may show; large tiles take everything and page
@@ -141,6 +168,22 @@ struct UsageTile<Header: View>: View {
         case .small: WidgetUsageRow.smallWidgetRowLimit(for: self.entry)
         case .medium: WidgetUsageRow.mediumWidgetRowLimit(for: self.entry)
         case .large: nil
+        }
+    }
+
+    private func smallContent(
+        plan: WidgetTilePlan,
+        fallback: WidgetFallbackHeroContent?,
+        color: Color,
+        metrics: [WidgetMetricRow]) -> some View
+    {
+        VStack(alignment: .leading, spacing: 4) {
+            self.header()
+            self.hero(plan: plan, fallback: fallback, color: color, spreads: false)
+            VStack(alignment: .leading, spacing: 3) {
+                self.lanes(plan: plan, color: color)
+            }
+            self.metrics(metrics)
         }
     }
 
@@ -159,21 +202,32 @@ struct UsageTile<Header: View>: View {
                 showUsed: self.showsUsed)
             HeroBlock(
                 value: WidgetFormat.percent(displayed),
-                caption: WidgetLaneCopy.caption(title: lane.title, showUsed: self.showsUsed),
-                detail: WidgetLaneCopy.resetText(
-                    resetsAt: lane.resetsAt,
-                    resetDescription: lane.resetDescription),
+                caption: Text(WidgetLaneCopy.caption(title: lane.title, showUsed: self.showsUsed)),
+                detail: self.resetText(lane),
                 barPercent: displayed ?? 0,
                 isLow: QuotaSeverity.isLow(remaining: lane.remainingPercent),
                 color: color,
                 numberSize: self.size.heroNumberSize,
-                spreads: spreads)
+                spreads: spreads,
+                compact: self.size == .small)
         } else if let fallback {
             HeroBlock(
                 value: fallback.value,
-                caption: fallback.caption,
-                detail: fallback.detail,
-                numberSize: self.size.heroNumberSize)
+                caption: WidgetFormat.tokenRowTitle(
+                    fallback.caption,
+                    summary: fallback.consumedMetricID == "session-cost" ? self.entry.tokenUsage : nil,
+                    entryUpdatedAt: self.entry.updatedAt),
+                detail: fallback.detail.map { Text($0) },
+                numberSize: self.size.heroNumberSize,
+                compact: self.size == .small)
+        }
+    }
+
+    private func resetText(_ lane: WidgetTileLane) -> Text? {
+        switch WidgetLaneCopy.reset(resetsAt: lane.resetsAt, resetDescription: lane.resetDescription) {
+        case let .date(reset): Text("Reset: \(Text(reset, style: .relative))")
+        case let .text(value): Text(value)
+        case nil: nil
         }
     }
 
@@ -208,7 +262,13 @@ struct UsageTile<Header: View>: View {
                     WidgetSeparator().padding(.bottom, 2)
                 }
                 ForEach(lines) { line in
-                    MetricLine(title: line.title, value: line.value, isProminent: line.isProminent)
+                    MetricLine(
+                        title: WidgetFormat.tokenRowTitle(
+                            line.title,
+                            summary: ["session-cost", "last30"].contains(line.id) ? self.entry.tokenUsage : nil,
+                            entryUpdatedAt: self.entry.updatedAt),
+                        value: line.value,
+                        isProminent: line.isProminent)
                 }
             }
         }
@@ -273,10 +333,7 @@ enum WidgetMetricRows {
             if size == .large {
                 rows.append(WidgetMetricRow(
                     id: "last30",
-                    title: WidgetFormat.tokenRowTitle(
-                        token.last30DaysLabel,
-                        summary: token,
-                        entryUpdatedAt: entry.updatedAt),
+                    title: token.last30DaysLabel,
                     value: WidgetFormat.costAndTokens(
                         cost: token.last30DaysCostUSD,
                         tokens: token.last30DaysTokens,
@@ -293,9 +350,10 @@ enum WidgetMetricRows {
         compact: Bool = false) -> WidgetMetricRow
     {
         // "$1.56 · 1.1M tokens" does not fit beside its label on a 127pt tile — the label loses and
-        // renders as "T…". Small tiles carry the money only.
+        // renders as "T…". Prefer money when known, retaining tokens for unpriced history.
         let value = compact
             ? (token.sessionCostUSD.map { WidgetFormat.currency($0, code: token.currencyCode) }
+                ?? token.sessionTokens.map(WidgetFormat.tokenCount)
                 ?? WidgetFormat.unavailable)
             : WidgetFormat.costAndTokens(
                 cost: token.sessionCostUSD,
@@ -303,10 +361,7 @@ enum WidgetMetricRows {
                 currencyCode: token.currencyCode)
         return WidgetMetricRow(
             id: "session-cost",
-            title: WidgetFormat.tokenRowTitle(
-                token.sessionLabel,
-                summary: token,
-                entryUpdatedAt: entry.updatedAt),
+            title: token.sessionLabel,
             value: value,
             isProminent: isProminent)
     }
@@ -346,7 +401,16 @@ enum WidgetFallbackHero {
                 detail: nil,
                 consumedMetricID: "credits")
         }
-        guard let token = entry.tokenUsage, let cost = token.sessionCostUSD else { return nil }
+        guard let token = entry.tokenUsage else { return nil }
+        guard let cost = token.sessionCostUSD else {
+            return token.sessionTokens.map { tokens in
+                WidgetFallbackHeroContent(
+                    value: UsageFormatter.tokenCountString(tokens),
+                    caption: "\(token.sessionLabel) tokens",
+                    detail: nil,
+                    consumedMetricID: "session-cost")
+            }
+        }
         return WidgetFallbackHeroContent(
             value: WidgetFormat.currency(cost, code: token.currencyCode),
             caption: token.sessionLabel,

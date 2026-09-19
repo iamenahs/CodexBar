@@ -2,27 +2,9 @@ import CodexBarCore
 import Foundation
 
 extension UsageStore {
-    nonisolated static func codexSessionQuotaOwnerKey(
-        for refreshGuard: CodexAccountScopedRefreshGuard?) -> CodexSessionQuotaOwnerKey?
-    {
-        guard let refreshGuard else { return nil }
-        return CodexSessionQuotaOwnerKey(refreshGuard: refreshGuard)
-    }
-
-    nonisolated static func codexSessionQuotaOwnersMatch(
-        _ lhs: CodexAccountScopedRefreshGuard?,
-        _ rhs: CodexAccountScopedRefreshGuard?) -> Bool
-    {
-        guard let lhsKey = self.codexSessionQuotaOwnerKey(for: lhs),
-              let rhsKey = self.codexSessionQuotaOwnerKey(for: rhs)
-        else {
-            return false
-        }
-        return lhsKey == rhsKey
-    }
-
     private struct ProviderRefreshOutcomeContext {
         let generation: UInt64
+        let includesCredits: Bool
         let claudeUsesConsumerAutoPipeline: Bool
         let codexExpectedGuard: CodexAccountScopedRefreshGuard?
         let tokenAccount: ProviderTokenAccount?
@@ -40,7 +22,9 @@ extension UsageStore {
         let expectedGuard: CodexAccountScopedRefreshGuard
         let limitResetOwnerKey: CodexLimitResetOwnerKey?
         let previousSnapshot: UsageSnapshot?
+        let previousSourceLabel: String?
         let missingWindowBackfillSnapshot: UsageSnapshot?
+        let pendingWeeklyResetCandidate: CodexWeeklyResetPublicationCandidate?
     }
 
     private struct ClaudeRefreshReconciliation {
@@ -307,7 +291,7 @@ extension UsageStore {
             self.lastKnownResetSnapshots[.codex] = hydratedSnapshot
             self.errors[.codex] = hydratedPrior.error
             self.lastSourceLabels[.codex] = hydratedPrior.sourceLabel
-            self.publishHydratedCodexCreditsIfNeeded(from: hydratedPrior.credits, accountKey: expectedGuard.accountKey)
+            self.publishHydratedCodexCreditsIfNeeded(from: hydratedPrior.credits, ownerGuard: expectedGuard)
             self.lastCodexUsagePublicationGuard = expectedGuard
             self.lastCodexAccountScopedRefreshGuard = expectedGuard
         }
@@ -328,7 +312,9 @@ extension UsageStore {
             expectedGuard: expectedGuard,
             limitResetOwnerKey: ownerKey,
             previousSnapshot: previousSnapshot,
-            missingWindowBackfillSnapshot: missingWindowBackfillSnapshot)
+            previousSourceLabel: hydratedPrior?.sourceLabel ?? self.lastSourceLabels[.codex],
+            missingWindowBackfillSnapshot: missingWindowBackfillSnapshot,
+            pendingWeeklyResetCandidate: hydratedPrior?.weeklyResetCandidate)
     }
 
     /// Runs one provider fetch pass. A nonnil result keeps the retry inside the current coordinator request, so
@@ -435,7 +421,9 @@ extension UsageStore {
             initialOutcome: initialOutcome,
             expectedGuard: codexExpectedGuard,
             previousSnapshot: previousCodexSnapshot,
+            previousSourceLabel: codexPreparation?.previousSourceLabel,
             missingWindowBackfillSnapshot: codexMissingWindowBackfillSnapshot,
+            pendingWeeklyResetCandidate: codexPreparation?.pendingWeeklyResetCandidate,
             fetchOutcome: fetchOutcome,
             generation: generation))
         else {
@@ -459,6 +447,7 @@ extension UsageStore {
             generation: generation))
         let outcomeContext = ProviderRefreshOutcomeContext(
             generation: generation,
+            includesCredits: fetchContext.includeCredits,
             claudeUsesConsumerAutoPipeline: Self.isClaudeConsumerAutoPipeline(
                 provider: provider,
                 context: fetchContext,
@@ -517,10 +506,12 @@ extension UsageStore {
             break
         }
         guard self.isCurrentProviderRefreshGeneration(provider, generation: context.generation) else { return nil }
-        await self.applyProviderRefreshOutcome(
+        await self.applyProviderRefreshOutcome(provider: provider, outcome: outcome, context: context)
+        self.scheduleSupplementalUsageUpdate(
             provider: provider,
             outcome: outcome,
-            context: context)
+            generation: context.generation,
+            accountID: context.tokenAccount?.id)
         return nil
     }
 
@@ -687,7 +678,7 @@ extension UsageStore {
             return
         }
         let accountScoped = if let tokenAccount = currentTokenAccount {
-            self.applyAccountLabel(scoped, provider: provider, account: tokenAccount)
+            scoped.withAccountLabel(tokenAccount.label, for: provider)
         } else {
             scoped
         }
@@ -712,11 +703,10 @@ extension UsageStore {
             } else {
                 self.lastKnownResetSnapshots[provider.instanceID]
             }
-            let profileStable = self.preservingDeepSeekProfileCatalog(in: accountScoped, provider: provider)
-            let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
-                current: profileStable,
-                previous: self.snapshots[provider.instanceID])
-            let backfilled = stabilized.backfillingResetTimes(from: resetBackfillSource)
+            // Resolve display-only allowances after any suspended request has completed.
+            let allowanceCurrent = self.resolvingCurrentCopilotAllowance(in: accountScoped, provider: provider)
+            let backfilled = self.preparePublishedSnapshot(
+                allowanceCurrent, provider: provider, resetBackfillSource: resetBackfillSource, context: context)
             let warningAccountDiscriminator = Self.warningAccountDiscriminator(
                 provider: provider,
                 tokenAccount: currentTokenAccount,
@@ -835,7 +825,7 @@ extension UsageStore {
             return
         }
         // Credential-change cleanup already ran above; cancellation is now safe to suppress.
-        if Self.errorIsCancellation(error) {
+        if Self.shouldSuppressProviderCancellation(error, priorSnapshot: self.snapshots[provider.instanceID]) {
             if provider == .deepseek,
                self.isCurrentProviderRefreshGeneration(provider, generation: context.generation)
             {
@@ -857,6 +847,24 @@ extension UsageStore {
             error: error,
             attempts: attempts,
             context: context)
+    }
+
+    private func preparePublishedSnapshot(
+        _ snapshot: UsageSnapshot,
+        provider: UsageProvider,
+        resetBackfillSource: UsageSnapshot?,
+        context: ProviderRefreshOutcomeContext) -> UsageSnapshot
+    {
+        let profileStable = self.preservingDeepSeekProfileCatalog(in: snapshot, provider: provider)
+        let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
+            current: profileStable,
+            previous: self.snapshots[provider.instanceID])
+        return self.preservingCodexCost(
+            in: stabilized,
+            for: provider,
+            owner: context.codexExpectedGuard,
+            includesCredits: context.includesCredits)
+            .backfillingResetTimes(from: resetBackfillSource)
     }
 
     private func preservingDeepSeekProfileCatalog(
@@ -1305,7 +1313,7 @@ extension UsageStore {
     }
 
     private func clearClaudeCredentialDerivedStateForCredentialSwap() {
-        // Provider-specific by design: Claude credential swaps invalidate OAuth, swap, widget, quota, and token state.
+        // Provider-specific by design: retire Claude projections but preserve known accounts' warning episodes.
         self.widgetUsagePreservationBlockedProviders.insert(.claude)
         self.snapshots.removeValue(forKey: .claude)
         self.lastKnownResetSnapshots.removeValue(forKey: .claude)
@@ -1318,7 +1326,9 @@ extension UsageStore {
         self.failureGates[.claude]?.reset()
         self.tokenFailureGates[.claude]?.reset()
         self.clearSessionQuotaTransitionState(provider: .claude)
-        self.quotaWarningState = self.quotaWarningState.filter { $0.key.provider != .claude }
+        self.quotaWarningState = self.quotaWarningState.filter {
+            $0.key.provider != .claude || $0.key.accountDiscriminator != nil
+        }
         self.lastTokenFetchAt.removeValue(forKey: .claude)
     }
 
@@ -1328,6 +1338,13 @@ extension UsageStore {
         attempts: [ProviderFetchAttempt],
         context: ProviderRefreshOutcomeContext) async
     {
+        // Provider-specific by design: Grok's local fallback scans off the main thread when remote billing fails.
+        let grokLocalFallback: CostUsageTokenSnapshot? = if provider == .grok {
+            try? await self.loadGrokLocalTokenSnapshot(historyDays: SpendDashboardSource.scanDays)
+        } else {
+            nil
+        }
+        guard !Task.isCancelled else { return }
         let shouldNotifyPermissionPrompt = Self.isPermissionPromptWaiting(error)
         await MainActor.run {
             guard self.isCurrentProviderRefreshGeneration(provider, generation: context.generation) else { return }
@@ -1413,7 +1430,8 @@ extension UsageStore {
                 Self.isClaudeCLIUsageParseFailure(error)
             let preservesPriorData = Self.shouldPreservePriorSnapshot(
                 after: error,
-                hadPriorData: hadPriorData) ||
+                hadPriorData: hadPriorData,
+                priorSnapshot: self.snapshots[provider.instanceID]) ||
                 (provider == .claude &&
                     hadPriorData &&
                     (context.claudeUsesConsumerAutoPipeline ||
@@ -1450,11 +1468,7 @@ extension UsageStore {
                     // Provider-specific by design: local ~/.grok/sessions tokens remain readable
                     // when the remote billing probe fails.
                     if provider == .grok {
-                        if let local = self.tokenSnapshot(
-                            fromProviderSnapshot: nil,
-                            provider: .grok,
-                            historyDays: SpendDashboardSource.scanDays)
-                        {
+                        if let local = grokLocalFallback {
                             self.publishTokenSnapshot(local, for: provider)
                         } else {
                             self.clearTokenSnapshot(for: provider)
@@ -1510,7 +1524,7 @@ extension UsageStore {
     }
 
     nonisolated static func isPreservableNetworkTransportError(_ error: Error) -> Bool {
-        let nsError = error as NSError
+        let nsError = self.underlyingProviderTransportError(error) as NSError
         guard nsError.domain == NSURLErrorDomain else { return false }
         switch nsError.code {
         case NSURLErrorTimedOut,
@@ -1533,11 +1547,12 @@ extension UsageStore {
     }
 
     static func isStartupConnectivityRetryableError(_ error: Error) -> Bool {
-        if error is CancellationError {
+        let transportError = self.underlyingProviderTransportError(error)
+        if transportError is CancellationError {
             return false
         }
 
-        let nsError = error as NSError
+        let nsError = transportError as NSError
         if nsError.domain == NSURLErrorDomain {
             switch nsError.code {
             case NSURLErrorTimedOut,
@@ -1573,7 +1588,13 @@ extension UsageStore {
         if case ClaudeWebAPIFetcher.FetchError.unauthorized = error {
             return true
         }
-        return error.localizedDescription == ClaudeWebAPIFetcher.FetchError.unauthorized.localizedDescription
+        if case ClaudeWebAPIFetcher.FetchError.cloudflareChallenge = error {
+            return true
+        }
+        return [
+            ClaudeWebAPIFetcher.FetchError.unauthorized.localizedDescription,
+            ClaudeWebAPIFetcher.FetchError.cloudflareChallenge.localizedDescription,
+        ].contains(error.localizedDescription)
     }
 
     nonisolated static func isPermissionPromptWaiting(_ error: Error) -> Bool {

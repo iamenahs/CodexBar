@@ -19,6 +19,25 @@ struct TokenSnapshotPublication: Sendable, Equatable {
 }
 
 extension UsageStore {
+    func logTokenUsageSuccess(
+        provider: UsageProvider,
+        snapshot: CostUsageTokenSnapshot,
+        historyDays: Int,
+        startedAt: Date)
+    {
+        let durationText = String(format: "%.2f", Date().timeIntervalSince(startedAt))
+        let sessionCost = snapshot.sessionCostUSD
+            .map { UsageFormatter.currencyString($0, currencyCode: snapshot.currencyCode) } ?? "—"
+        let monthCost = snapshot.last30DaysCostUSD
+            .map { UsageFormatter.currencyString($0, currencyCode: snapshot.currencyCode) } ?? "—"
+        let message =
+            "cost usage success provider=\(provider.rawValue) " +
+            "duration=\(durationText)s " +
+            "today=\(sessionCost) " +
+            "historyDays=\(historyDays) windowCost=\(monthCost)"
+        self.tokenCostLogger.info(message)
+    }
+
     enum CursorCostCookiePreparation {
         case proceed(String?)
         case reject
@@ -118,13 +137,34 @@ extension UsageStore {
         self.tokenSnapshotPublicationRevisions[provider.instanceID] ?? 0
     }
 
+    enum TokenSnapshotError: LocalizedError {
+        case historyUnavailable
+
+        var errorDescription: String? {
+            "Local token history is unavailable or incomplete."
+        }
+    }
+
+    func retainsEstablishedTokenHistory(_ snapshot: CostUsageTokenSnapshot, for provider: UsageProvider) -> Bool {
+        // A bounded Codex refresh can succeed with partial rows while catch-up remains pending.
+        // Account and history-window changes fail the current-publication lookup below.
+        // Provider-specific by design: only Codex retains established history during bounded catch-up.
+        if provider == .codex,
+           !snapshot.historyCoverageIsEstablished,
+           self.tokenSnapshotPublicationForCurrentProviderConfig(for: provider)?
+               .snapshot?.historyCoverageIsEstablished == true
+        {
+            return true
+        }
+        return false
+    }
+
     func publishTokenSnapshot(_ snapshot: CostUsageTokenSnapshot, for provider: UsageProvider) {
-        self.tokenSnapshots[provider.instanceID] = snapshot
+        if self.retainsEstablishedTokenHistory(snapshot, for: provider) { return }
         self.publishTokenSnapshotState(snapshot, for: provider)
     }
 
     func publishConfirmedEmptyTokenSnapshot(for provider: UsageProvider) {
-        self.tokenSnapshots.removeValue(forKey: provider.instanceID)
         self.publishTokenSnapshotState(nil, for: provider)
     }
 
@@ -139,7 +179,6 @@ extension UsageStore {
     }
 
     func installCachedTokenSnapshot(_ snapshot: CostUsageTokenSnapshot, for provider: UsageProvider) {
-        self.tokenSnapshots[provider.instanceID] = snapshot
         self.tokenSnapshotPublications[provider.instanceID] = TokenSnapshotPublication(
             snapshot: snapshot,
             publicationRevision: self.tokenSnapshotPublicationRevision(for: provider),
@@ -148,15 +187,15 @@ extension UsageStore {
     }
 
     func clearTokenSnapshot(for provider: UsageProvider) {
-        self.tokenSnapshots.removeValue(forKey: provider.instanceID)
         self.tokenSnapshotPublications.removeValue(forKey: provider.instanceID)
     }
 
     func clearTokenSnapshots() {
-        self.tokenSnapshots.removeAll()
         self.tokenSnapshotPublications.removeAll()
         self.spendDashboardTokenPublications.removeAll()
         self.spendDashboardTokenPublicationRevisions.removeAll()
+        self.spendDashboardTokenIncorporatedTriggers.removeAll()
+        self.spendDashboardTokenFailedTriggers.removeAll()
     }
 
     func installProviderDerivedTokenSnapshot(from snapshot: UsageSnapshot, for provider: UsageProvider) {
@@ -360,13 +399,20 @@ extension UsageStore {
             return "\(base)|cursorCookie=manual:\(headerFingerprint)"
         }
 
-        let credentialFingerprint = CookieHeaderCache.loadForDisplay(provider: .cursor)
-            .map { CookieHeaderCache.credentialFingerprint($0.cookieHeader) } ?? "unresolved"
+        let credentialFingerprint = self.cursorCostCredentialFingerprintForDisplay() ?? "unresolved"
         return self.cursorCostScopeSignature(
             historyDays: historyDays,
             source: source,
             credentialFingerprint: credentialFingerprint,
             includeSettingsRevision: includeSettingsRevision)
+    }
+
+    private func cursorCostCredentialFingerprintForDisplay() -> String? {
+        #if DEBUG
+        if let override = self._test_cursorCostCredentialFingerprintOverride { return override() }
+        #endif
+        return CookieHeaderCache.loadForDisplay(provider: .cursor)
+            .map { CookieHeaderCache.credentialFingerprint($0.cookieHeader) }
     }
 
     func cursorCostScopeSignature(
@@ -398,35 +444,62 @@ extension UsageStore {
         return now.timeIntervalSince(last) < tokenFetchTTL
     }
 
-    func tokenRefreshPublicationIsCurrent(
-        provider: UsageProvider,
-        publicationRevision: ProviderPublicationRevision,
-        providerConfigRevision: UInt64,
+    struct TokenRefreshPublicationScope {
+        let publicationRevision: ProviderPublicationRevision
+        let providerConfigRevision: UInt64
+        let costSettingsRevision: UInt64
+        let historyDays: Int
+        let signature: String
+    }
+
+    func tokenRefreshPublicationScope(
+        for provider: UsageProvider,
         historyDays: Int,
-        costScopeSignature: String,
-        fetchedCredentialScopeFingerprint: String? = nil) -> Bool
+        costScopeSignature: String) -> TokenRefreshPublicationScope
     {
-        guard self.providerPublicationRevisionIsCurrent(publicationRevision, for: provider),
-              self.settings.providerConfigRevision(for: provider) == providerConfigRevision,
-              self.settings.costUsageEnabled,
+        TokenRefreshPublicationScope(
+            publicationRevision: self.providerPublicationRevision(for: provider),
+            providerConfigRevision: self.settings.providerConfigRevision(for: provider),
+            costSettingsRevision: self.settings.costUsageSettingsRevision,
+            historyDays: historyDays,
+            signature: costScopeSignature)
+    }
+
+    enum TokenRefreshPublicationDisposition {
+        case current
+        case scopeChanged
+        case unchangedCredentialMismatch
+    }
+
+    func tokenRefreshPublicationDisposition(
+        provider: UsageProvider,
+        scope: TokenRefreshPublicationScope,
+        fetchedCredentialScopeFingerprint: String? = nil) -> TokenRefreshPublicationDisposition
+    {
+        guard self.providerPublicationRevisionIsCurrent(scope.publicationRevision, for: provider),
+              self.settings.providerConfigRevision(for: provider) == scope.providerConfigRevision,
+              self.settings.costUsageSettingsRevision == scope.costSettingsRevision,
+              self.settings.isCostUsageEffectivelyEnabled(for: provider),
               self.isEnabled(provider),
-              self.settings.costUsageHistoryDays == historyDays
+              self.settings.costUsageHistoryDays == scope.historyDays
         else {
-            return false
+            return .scopeChanged
         }
         let currentSignature = self.tokenSnapshotScopeSignature(for: provider)
         if provider == .cursor,
            self.settings.cursorCookieSource == .auto,
-           costScopeSignature.contains("|cursorCookie=auto:"),
+           scope.signature.contains("|cursorCookie=auto:"),
            let fetchedCredentialScopeFingerprint
         {
             let resolvedSignature = self.cursorCostScopeSignature(
-                historyDays: historyDays,
+                historyDays: scope.historyDays,
                 source: .auto,
                 credentialFingerprint: fetchedCredentialScopeFingerprint)
-            return currentSignature == resolvedSignature
+            if currentSignature == resolvedSignature { return .current }
+            // The fetched account is still unconfirmed; retry only after the attempted scope changes.
+            return currentSignature == scope.signature ? .unchangedCredentialMismatch : .scopeChanged
         }
-        return currentSignature == costScopeSignature
+        return currentSignature == scope.signature ? .current : .scopeChanged
     }
 
     func completedTokenCostScopeSignature(
@@ -475,8 +548,7 @@ extension UsageStore {
         case .xai:
             return snapshot.flatMap { XAICostUsageMapping.tokenSnapshot(from: $0, historyDays: windowDays) }
         case .grok:
-            return GrokLocalSessionScanner.summarize(lookbackDays: windowDays)
-                .toCostUsageTokenSnapshot(historyDays: windowDays)
+            return self.grokLocalTokenSnapshot(from: snapshot, historyDays: windowDays)
         default:
             return nil
         }
@@ -535,5 +607,22 @@ extension UsageStore {
 
     nonisolated static func tokenCostNoDataMessage(for provider: UsageProvider) -> String {
         ProviderDescriptorRegistry.descriptor(for: provider).tokenCost.noDataMessage()
+    }
+
+    func regularTokenSnapshotIsConfirmedEmpty(
+        _ snapshot: CostUsageTokenSnapshot,
+        for provider: UsageProvider) throws -> Bool
+    {
+        guard snapshot.daily.isEmpty, snapshot.meteredCostUSD == nil else { return false }
+        if snapshot.historyCoverageIsEstablished { return true }
+        guard self.retainsEstablishedTokenHistory(snapshot, for: provider) else {
+            throw TokenSnapshotError.historyUnavailable
+        }
+        return false
+    }
+
+    func tokenCostIsAccountAgnostic(for provider: UsageProvider) -> Bool {
+        // Provider-specific by design: only Codex's explicit ambient scope spans local accounts.
+        provider == .codex && self.tokenCostScope(for: provider).signature == "codex:ambient"
     }
 }

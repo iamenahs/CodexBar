@@ -36,6 +36,8 @@ public struct ProviderTokenCostConfig: Sendable {
     public let showsRequestHistory: Bool
     public let hintPlacement: ProviderTokenCostHintPlacement
     public let chartEstimateDisclaimer: ProviderTokenCostHint?
+    /// Keep calendar slots for missing dates; coverage determines whether their costs are known.
+    public let preservesCalendarDaysInCharts: Bool
 
     public init(
         supportsTokenCost: Bool,
@@ -50,7 +52,8 @@ public struct ProviderTokenCostConfig: Sendable {
         primaryValue: ProviderTokenCostPrimaryValue = .session,
         showsRequestHistory: Bool = true,
         hintPlacement: ProviderTokenCostHintPlacement = .afterRequestHistory,
-        chartEstimateDisclaimer: ProviderTokenCostHint? = nil)
+        chartEstimateDisclaimer: ProviderTokenCostHint? = nil,
+        preservesCalendarDaysInCharts: Bool = false)
     {
         self.supportsTokenCost = supportsTokenCost
         self.noDataMessage = noDataMessage
@@ -65,6 +68,7 @@ public struct ProviderTokenCostConfig: Sendable {
         self.showsRequestHistory = showsRequestHistory
         self.hintPlacement = hintPlacement
         self.chartEstimateDisclaimer = chartEstimateDisclaimer
+        self.preservesCalendarDaysInCharts = preservesCalendarDaysInCharts
     }
 }
 
@@ -227,6 +231,7 @@ public struct ProviderPaceCapability: Sendable {
     public let tertiary: ProviderStandardPaceLane?
     public let showsHeadroomHint: Bool
     public let sessionPaceWindowRule: ProviderPaceWindowRule
+    public let allowsEstimatedUsage: Bool
 
     public init(
         resetWindowPace: ProviderPaceWindowRule = .unsupported,
@@ -235,7 +240,8 @@ public struct ProviderPaceCapability: Sendable {
         secondary: ProviderStandardPaceLane? = nil,
         tertiary: ProviderStandardPaceLane? = nil,
         showsHeadroomHint: Bool = false,
-        sessionPaceWindowRule: ProviderPaceWindowRule = .unsupported)
+        sessionPaceWindowRule: ProviderPaceWindowRule = .unsupported,
+        allowsEstimatedUsage: Bool = true)
     {
         self.resetWindowPace = resetWindowPace
         self.inferredMonthlyDuration = inferredMonthlyDuration
@@ -244,6 +250,11 @@ public struct ProviderPaceCapability: Sendable {
         self.tertiary = tertiary
         self.showsHeadroomHint = showsHeadroomHint
         self.sessionPaceWindowRule = sessionPaceWindowRule
+        self.allowsEstimatedUsage = allowsEstimatedUsage
+    }
+
+    public func allowsPace(dataConfidence: UsageDataConfidence) -> Bool {
+        self.allowsEstimatedUsage || dataConfidence != .estimated
     }
 
     public func supportsResetWindowPace(window: RateWindow, now: Date) -> Bool {
@@ -358,39 +369,51 @@ public struct ProviderDescriptor: Sendable {
 }
 
 public enum ProviderDescriptorRegistry {
-    private final class Store: @unchecked Sendable {
-        var ordered: [ProviderDescriptor] = []
-        var byID: [UsageProvider: ProviderDescriptor] = [:]
-    }
+    final class Store: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ordered: [ProviderDescriptor] = []
+        private var indexByID: [UsageProvider: Int] = [:]
 
-    private static let lock = NSLock()
-    private static let store = Store()
-    private static let bootstrap: Void = {
-        for descriptor in ProviderManifest.allDescriptors {
-            _ = ProviderDescriptorRegistry.register(descriptor)
+        @discardableResult
+        func register(_ descriptor: ProviderDescriptor) -> ProviderDescriptor {
+            self.lock.withLock {
+                if let index = self.indexByID[descriptor.id] {
+                    self.ordered[index] = descriptor
+                } else {
+                    self.indexByID[descriptor.id] = self.ordered.count
+                    self.ordered.append(descriptor)
+                }
+                return descriptor
+            }
         }
-    }()
 
-    private static func ensureBootstrapped() {
-        _ = self.bootstrap
+        var all: [ProviderDescriptor] {
+            self.lock.withLock { self.ordered }
+        }
+
+        func descriptor(for id: UsageProvider) -> ProviderDescriptor? {
+            self.lock.withLock {
+                guard let index = self.indexByID[id] else { return nil }
+                return self.ordered[index]
+            }
+        }
     }
+
+    private static let store: Store = {
+        let store = Store()
+        for descriptor in ProviderManifest.allDescriptors {
+            store.register(descriptor)
+        }
+        return store
+    }()
 
     @discardableResult
     public static func register(_ descriptor: ProviderDescriptor) -> ProviderDescriptor {
-        self.lock.lock()
-        defer { self.lock.unlock() }
-        if self.store.byID[descriptor.id] == nil {
-            self.store.ordered.append(descriptor)
-        }
-        self.store.byID[descriptor.id] = descriptor
-        return descriptor
+        self.store.register(descriptor)
     }
 
     public static var all: [ProviderDescriptor] {
-        self.ensureBootstrapped()
-        self.lock.lock()
-        defer { self.lock.unlock() }
-        return self.store.ordered
+        self.store.all
     }
 
     public static var metadata: [UsageProvider: ProviderMetadata] {
@@ -398,18 +421,13 @@ public enum ProviderDescriptorRegistry {
     }
 
     public static func descriptor(for id: UsageProvider) -> ProviderDescriptor {
-        self.ensureBootstrapped()
-        if let found = self.store.byID[id] {
-            return found
-        }
-        if let found = self.all.first(where: { $0.id == id }) {
+        if let found = self.store.descriptor(for: id) {
             return found
         }
         fatalError("Missing ProviderDescriptor for \(id.rawValue)")
     }
 
     public static var cliNameMap: [String: UsageProvider] {
-        self.ensureBootstrapped()
         var map: [String: UsageProvider] = [:]
         for descriptor in self.all {
             map[descriptor.cli.name] = descriptor.id

@@ -53,6 +53,10 @@ check_package_info_plist() {
   "${ROOT_DIR}/Scripts/test_package_info_plist.sh"
 }
 
+check_cli_installer() {
+  /bin/bash "${ROOT_DIR}/Scripts/test_install_codexbar_cli.sh"
+}
+
 check_release_dsym_paths() {
   "${ROOT_DIR}/Scripts/test_release_dsym_paths.sh"
 }
@@ -63,6 +67,14 @@ check_release_checksum() {
 
 check_sparkle_signing_paths() {
   "${ROOT_DIR}/Scripts/test_sparkle_signing_paths.sh"
+}
+
+check_swift_static_sdk_installer() {
+  python3 "${ROOT_DIR}/Scripts/test_install_swift_static_sdk.py"
+}
+
+check_mimo_usage_script() {
+  python3 "${ROOT_DIR}/Scripts/test_mimo_usage.py"
 }
 
 check_swift_test_sharding() {
@@ -122,6 +134,8 @@ run_portable_checks() {
   check_release_dsym_paths
   check_release_checksum
   check_sparkle_signing_paths
+  check_swift_static_sdk_installer
+  check_mimo_usage_script
   check_swift_test_sharding
   check_ci_path_gate
   check_homebrew_tap_wait
@@ -188,6 +202,7 @@ cmd="${1:-lint}"
 case "$cmd" in
   lint)
     check_app_locales
+    check_cli_installer
     run_portable_checks
     run_javascript_checks
     run_swiftformat_lint
@@ -200,6 +215,7 @@ case "$cmd" in
     ;;
   lint-macos)
     check_app_locales
+    check_cli_installer
     run_javascript_checks
     run_swiftformat_lint
     ;;

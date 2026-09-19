@@ -28,7 +28,6 @@ struct CodexBarUsageWidgetView: View {
                 }
             } else {
                 WidgetEmptyState(message: "Usage data will appear once the app refreshes.")
-                    .padding(WidgetLayout.tilePadding)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -48,7 +47,6 @@ struct CodexBarHistoryWidgetView: View {
                 HistoryView(entry: providerEntry, isLarge: self.family == .systemLarge)
             } else {
                 WidgetEmptyState(message: "Usage history will appear after a refresh.")
-                    .padding(WidgetLayout.tilePadding)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -66,7 +64,6 @@ struct CodexBarCompactWidgetView: View {
                 CompactMetricView(entry: providerEntry, metric: self.entry.metric)
             } else {
                 WidgetEmptyState(message: "Usage data will appear once the app refreshes.")
-                    .padding(WidgetLayout.tilePadding)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -99,7 +96,6 @@ struct CodexBarSwitcherWidgetView: View {
                         size: size)
                     WidgetEmptyState(message: "Usage data appears after a refresh.")
                 }
-                .padding(WidgetLayout.tilePadding)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -121,12 +117,17 @@ private struct CompactMetricView: View {
             // than clinging to the header with dead space underneath.
             HeroBlock(
                 value: display.value,
-                caption: display.label,
-                detail: display.detail,
+                caption: WidgetFormat.tokenRowTitle(
+                    display.label,
+                    summary: self.metric == .credits ? nil : self.entry.tokenUsage,
+                    entryUpdatedAt: self.entry.updatedAt),
+                detail: (display.detail ?? CompactMetricFormatter.unavailableDetail(
+                    value: display.value,
+                    entry: self.entry))
+                    .map { Text($0) },
                 numberSize: WidgetLayout.compactMetricNumberSize)
             Spacer(minLength: 0)
         }
-        .padding(WidgetLayout.tilePadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
@@ -147,35 +148,24 @@ enum CompactMetricFormatter {
                     label: "Extra usage balance",
                     detail: nil)
             }
-            let value = entry.creditsRemaining.map(WidgetFormat.credits) ?? WidgetFormat.unavailable
-            return CompactMetricDisplay(
-                value: value,
-                label: "Credits left",
-                detail: Self.unavailableDetail(value: value, entry: entry))
+            let value = entry.creditsRemaining.map(WidgetFormat.credits) ?? "—"
+            return CompactMetricDisplay(value: value, label: "Credits left", detail: nil)
         case .todayCost:
             let value = entry.tokenUsage.map { token in
-                token.sessionCostUSD.map { WidgetFormat.currency($0, code: token.currencyCode) }
-                    ?? WidgetFormat.unavailable
-            } ?? WidgetFormat.unavailable
+                token.sessionCostUSD.map { WidgetFormat.currency($0, code: token.currencyCode) } ?? "—"
+            } ?? "—"
             let detail = entry.tokenUsage?.sessionTokens.map(WidgetFormat.tokenCount)
             let label = entry.tokenUsage.map {
-                WidgetFormat.tokenRowTitle(
-                    Self.costMetricLabel($0.sessionLabel, provider: entry.provider),
-                    summary: $0,
-                    entryUpdatedAt: entry.updatedAt)
+                Self.costMetricLabel($0.sessionLabel, provider: entry.provider)
             } ?? "Today cost"
             return CompactMetricDisplay(value: value, label: label, detail: detail)
         case .last30DaysCost:
             let value = entry.tokenUsage.map { token in
-                token.last30DaysCostUSD.map { WidgetFormat.currency($0, code: token.currencyCode) }
-                    ?? WidgetFormat.unavailable
-            } ?? WidgetFormat.unavailable
+                token.last30DaysCostUSD.map { WidgetFormat.currency($0, code: token.currencyCode) } ?? "—"
+            } ?? "—"
             let detail = entry.tokenUsage?.last30DaysTokens.map(WidgetFormat.tokenCount)
             let label = entry.tokenUsage.map {
-                WidgetFormat.tokenRowTitle(
-                    Self.costMetricLabel($0.last30DaysLabel, provider: entry.provider),
-                    summary: $0,
-                    entryUpdatedAt: entry.updatedAt)
+                Self.costMetricLabel($0.last30DaysLabel, provider: entry.provider)
             } ?? "30d cost"
             return CompactMetricDisplay(value: value, label: label, detail: detail)
         }
@@ -206,7 +196,7 @@ enum CompactMetricFormatter {
 ///
 /// A widget cannot open a menu or a picker, so paging is the control that fits: it costs one line
 /// instead of a whole chip row, and the provider whose numbers are on screen is always named.
-private struct ProviderPagerHeader: View {
+struct ProviderPagerHeader: View {
     let providers: [UsageProvider]
     let selected: UsageProvider
     let updatedAt: Date
@@ -214,21 +204,26 @@ private struct ProviderPagerHeader: View {
 
     var body: some View {
         let pager = ProviderPager.make(providers: self.providers, selected: self.selected)
-        HStack(spacing: 7) {
-            ProviderMark(provider: self.selected, isSelected: true, size: self.size.markSize)
-            Text(ProviderTitle.text(for: self.selected, size: self.size))
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .layoutPriority(2)
-            if self.size != .small {
-                FreshnessLabel(updatedAt: self.updatedAt)
-                    .layoutPriority(0)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                ProviderMark(provider: self.selected, isSelected: true, size: self.size.markSize)
+                Text(ProviderTitle.text(for: self.selected, size: self.size))
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .layoutPriority(2)
+                if self.size != .small {
+                    FreshnessLabel(updatedAt: self.updatedAt)
+                        .layoutPriority(0)
+                }
+                Spacer(minLength: 4)
+                if let pager, pager.isPageable {
+                    ProviderPagerControls(pager: pager, size: self.size)
+                        .layoutPriority(1)
+                }
             }
-            Spacer(minLength: 4)
-            if let pager, pager.isPageable {
-                ProviderPagerControls(pager: pager, size: self.size)
-                    .layoutPriority(1)
+            if self.size == .small, WidgetFreshness.isStale(self.updatedAt) {
+                FreshnessLabel(updatedAt: self.updatedAt)
             }
         }
     }
@@ -257,14 +252,19 @@ private struct ProviderPagerControls: View {
 }
 
 private struct ProviderPageButton: View {
+    @Environment(\.widgetProviderSelectionOverride) private var selectionOverride
     let provider: UsageProvider
     let symbol: String
     let size: WidgetTileSize
 
     var body: some View {
         if let choice = ProviderChoice(provider: self.provider) {
-            Button(intent: SwitchWidgetProviderIntent(provider: choice)) {
-                self.glyph
+            Group {
+                if let selectionOverride {
+                    Button { selectionOverride(self.provider) } label: { self.glyph }
+                } else {
+                    Button(intent: SwitchWidgetProviderIntent(provider: choice)) { self.glyph }
+                }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text(ProviderPageButtonLabel.text(for: self.provider)))
@@ -301,11 +301,6 @@ struct WidgetUsageRow: Identifiable, Equatable {
     var resetsAt: Date?
     var resetDescription: String?
 
-    private enum AntigravityQuotaFamily {
-        case gemini
-        case claudeGPT
-    }
-
     static func smallWidgetRowLimit(for entry: WidgetSnapshot.ProviderEntry) -> Int? {
         self.widgetRowLimit(for: entry, family: .small)
     }
@@ -327,6 +322,7 @@ struct WidgetUsageRow: Identifiable, Equatable {
     static func rows(
         for entry: WidgetSnapshot.ProviderEntry,
         limit: Int? = nil,
+        applyBindingCap: Bool = true,
         now: Date = Date()) -> [WidgetUsageRow]
     {
         let rows: [WidgetUsageRow]
@@ -356,11 +352,11 @@ struct WidgetUsageRow: Identifiable, Equatable {
                     resetsAt: reset?.resetsAt,
                     resetDescription: reset?.resetDescription)
             }
-            rows = self.applyingCodexWeeklyCap(
+            rows = applyBindingCap ? self.applyingCodexWeeklyCap(
                 sourceRows,
                 snapshots: resolvedSnapshots,
                 provider: entry.provider,
-                now: now)
+                now: now) : sourceRows
         } else {
             let metadata = entry.provider.firstPartyProvider.flatMap { ProviderDefaults.metadata[$0] }
             var defaultRows = [
@@ -393,10 +389,10 @@ struct WidgetUsageRow: Identifiable, Equatable {
            limit >= 2,
            rows.contains(where: { $0.id.hasPrefix("antigravity-quota-summary-") })
         {
-            var selected = [AntigravityQuotaFamily.gemini, .claudeGPT].compactMap { family in
-                rows
-                    .filter { self.antigravityQuotaFamily(for: $0) == family }
-                    .min(by: self.isMoreConstrained)
+            var selected = AntigravityQuotaFamilyVisibility.KnownFamily.allCases.compactMap { family in
+                rows.filter {
+                    AntigravityQuotaFamilyVisibility.knownFamily(windowID: $0.id, title: $0.title) == family
+                }.min(by: self.isMoreConstrained)
             }
             let selectedIDs = Set(selected.map(\.id))
             let fallbackRows = rows.enumerated()
@@ -488,27 +484,6 @@ struct WidgetUsageRow: Identifiable, Equatable {
         return entry.tokenUsage
     }
 
-    private static func antigravityQuotaFamily(for row: WidgetUsageRow) -> AntigravityQuotaFamily? {
-        // Provider-specific by design: Antigravity IDs/titles classify Gemini versus third-party quota families.
-        guard row.id.hasPrefix("antigravity-quota-summary-") else { return nil }
-        let id = row.id.lowercased()
-        if id.contains("gemini") {
-            return .gemini
-        }
-        if id.contains("3p") || id.contains("third-party") {
-            return .claudeGPT
-        }
-
-        let title = row.title.lowercased()
-        if title.contains("gemini") {
-            return .gemini
-        }
-        if title.contains("claude") || title.contains("gpt") {
-            return .claudeGPT
-        }
-        return nil
-    }
-
     private static func isMoreConstrained(_ lhs: WidgetUsageRow, than rhs: WidgetUsageRow) -> Bool {
         switch (lhs.percentLeft, rhs.percentLeft) {
         case let (.some(left), .some(right)):
@@ -571,7 +546,6 @@ private struct HistoryView: View {
                 }
             }
         }
-        .padding(WidgetLayout.tilePadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
@@ -742,26 +716,6 @@ enum WidgetFormat {
         "\(UsageFormatter.tokenCountString(value)) tokens"
     }
 
-    static func relativeDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "en_US")
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    /// Freshness for the tile header. Abbreviated units keep it to a fixed short string so it can
-    /// never crowd out the provider name the way "5 days ago" did.
-    ///
-    /// Anything under a minute collapses to "Now": gallery placeholders are stamped with the render
-    /// time, and the formatter renders that instant as "in 0s", which reads as a future time.
-    static func shortRelativeDate(_ date: Date, relativeTo now: Date = Date()) -> String {
-        guard now.timeIntervalSince(date) >= 60 else { return "Now" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "en_US")
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: now)
-    }
-
     private static let dayKeyFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -788,10 +742,12 @@ enum WidgetFormat {
     /// freshness signal past `TokenUsageSummary.staleLagThreshold`.
     static func tokenRowTitle(
         _ base: String,
-        summary: WidgetSnapshot.TokenUsageSummary,
-        entryUpdatedAt: Date) -> String
+        summary: WidgetSnapshot.TokenUsageSummary?,
+        entryUpdatedAt: Date) -> Text
     {
-        guard summary.isStale(comparedTo: entryUpdatedAt), let updatedAt = summary.updatedAt else { return base }
-        return "\(base) · \(self.relativeDate(updatedAt))"
+        guard let summary, summary.isStale(comparedTo: entryUpdatedAt), let updatedAt = summary.updatedAt else {
+            return Text(base)
+        }
+        return Text("\(base) · \(Text(updatedAt, style: .relative))")
     }
 }

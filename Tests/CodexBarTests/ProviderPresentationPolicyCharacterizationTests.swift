@@ -11,7 +11,7 @@ struct ProviderPresentationPolicyCharacterizationTests {
     @Test
     func `automatic exhaustion priority is pinned for every provider`() {
         let optOut: Set<UsageProvider> = [
-            .antigravity, .perplexity, .zai, .copilot, .cursor, .minimax, .claude, .codex,
+            .antigravity, .perplexity, .zai, .copilot, .cursor, .minimax, .claude, .codex, .warp,
         ]
 
         for provider in UsageProvider.allCases {
@@ -19,6 +19,8 @@ struct ProviderPresentationPolicyCharacterizationTests {
                 MenuBarMetricWindowResolver.automaticSelectionPrioritizesExhaustedWindow(for: provider)
                     == !optOut.contains(provider),
                 "Unexpected exhaustion priority for \(provider.rawValue)")
+            #expect(ProviderDescriptorRegistry.descriptor(for: provider).presentation.switcherUsesAutomaticMenuBarWindow
+                == (provider == .warp))
         }
     }
 
@@ -82,13 +84,11 @@ struct ProviderPresentationPolicyCharacterizationTests {
         #expect(generic.session == secondary)
         #expect(generic.weekly == nil)
         #expect(MenuBarLayout.migrated(
-            iconStyle: .bars,
             displayMode: .percent,
             metricPreference: .primary,
             resetTimeDisplayStyle: .countdown,
             provider: .kimi).lines == [[.icon, .percent(window: .weekly)]])
         #expect(MenuBarLayout.migrated(
-            iconStyle: .bars,
             displayMode: .percent,
             metricPreference: .secondary,
             resetTimeDisplayStyle: .countdown,
@@ -151,7 +151,7 @@ struct ProviderPresentationPolicyCharacterizationTests {
     @Test
     @MainActor
     func `decorated icon style membership is pinned`() throws {
-        let decoratedStyles: Set<IconStyle> = [.codex, .claude, .gemini, .antigravity, .factory, .warp]
+        let decoratedStyles: Set<IconStyle> = [.codex, .claude, .gemini, .antigravity, .factory, .warp, .grok]
         for style in IconStyle.allCases {
             let decorated = IconRenderer.makeIcon(
                 primaryRemaining: 60,
@@ -171,6 +171,15 @@ struct ProviderPresentationPolicyCharacterizationTests {
                 try (#require(decorated.tiffRepresentation) != #require(plain.tiffRepresentation))
                     == decoratedStyles.contains(style),
                 "Unexpected icon decoration membership for \(style.rawValue)")
+        }
+    }
+
+    @Test
+    func `missing secondary lane reservation is claude only`() {
+        for provider in UsageProvider.allCases {
+            let actual = ProviderDescriptorRegistry.descriptor(for: provider)
+                .presentation.reservesMissingSecondaryIconLane
+            #expect(actual == (provider == .claude), "Unexpected missing-lane policy for \(provider.rawValue)")
         }
     }
 
